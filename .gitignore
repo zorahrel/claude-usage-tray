@@ -1,0 +1,4 @@
+ClaudeUsage
+ClaudeUsage.bak*
+*.o
+.build/
