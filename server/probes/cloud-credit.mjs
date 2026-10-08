@@ -52,24 +52,36 @@ export function creditAccount(home = os.homedir()) {
   }
 }
 
+// Tre esiti, tre comportamenti in menu: live → riga col saldo; nobonus
+// (login senza bonus, es. dopo rotazione vdm) → sezione nascosta;
+// failed (429, rete) → riga "in aggiornamento".
+export function classifyCreditOutput(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { kind: "failed" };
+  }
+  if (parsed && typeof parsed === "object" && parsed.iguana_necktie == null) {
+    return { kind: "nobonus" };
+  }
+  const value = parseCloudCredit(parsed);
+  return value ? { kind: "live", value } : { kind: "failed" };
+}
+
 export async function probeCloudCredit() {
   const bin = path.join(os.homedir(), "bin", "credito-cloud");
   if (!existsSync(bin)) return null; // tool assente: sezione nascosta
   const account = creditAccount();
   if (liveQuiet()) return { unavailable: true, account };
-  const live = await new Promise((resolve) => {
+  const out = await new Promise((resolve) => {
     execFile(bin, ["--json"], { timeout: 25000 }, (err, stdout) => {
-      if (err) return resolve(null);
-      try {
-        resolve(parseCloudCredit(JSON.parse(stdout)));
-      } catch {
-        resolve(null); // errore testuale (es. 429), non JSON
-      }
+      resolve(err ? null : stdout);
     });
   });
-  if (!live) {
-    markLiveFailed();
-    return { unavailable: true, account };
-  }
-  return { ...live, account };
+  const c = out === null ? { kind: "failed" } : classifyCreditOutput(out);
+  if (c.kind === "live") return { ...c.value, account };
+  if (c.kind === "nobonus") return null;
+  markLiveFailed();
+  return { unavailable: true, account };
 }

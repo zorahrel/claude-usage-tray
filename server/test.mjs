@@ -141,6 +141,15 @@ describe("parseCloudCredit", () => {
     assert.equal(parseCloudCredit(null), null);
     assert.equal(parseCloudCredit("xx"), null);
   });
+  it("classifyCreditOutput: live, nobonus, failed", async () => {
+    const { classifyCreditOutput } = await import("./probes/cloud-credit.mjs");
+    assert.equal(classifyCreditOutput(JSON.stringify({ iguana_necktie: {
+      remaining_dollars: 10, limit_dollars: 250,
+      resets_at: "2026-11-05T00:00:00Z" } })).kind, "live");
+    assert.equal(classifyCreditOutput('{"iguana_necktie":null}').kind, "nobonus");
+    assert.equal(classifyCreditOutput("credito-cloud: HTTP 429").kind, "failed");
+    assert.equal(classifyCreditOutput("").kind, "failed");
+  });
   it("creditAccount: legge l'email loggata o null", async () => {
     const { creditAccount } = await import("./probes/cloud-credit.mjs");
     const fs = await import("node:fs");

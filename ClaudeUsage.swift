@@ -565,6 +565,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let providers = snapshot?.providers ?? []
             let renewals = snapshot?.renewals ?? []
             var shown = Set<String>()
+            var creditShown = false
             for p in providers {
                 menu.addItem(sectionRow(p.name, providerId: p.id))
                 let accs = p.accounts ?? []
@@ -584,6 +585,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     for q in a.quotas {
                         menu.addItem(quotaBarRow(q))
                     }
+                    // Bonus cloud sotto il suo account, come i rinnovi: mai
+                    // sezione a parte (duplicherebbe l'account in lista).
+                    if let c = snapshot?.credit, c.account == a.label {
+                        menu.addItem(creditRow(c))
+                        creditShown = true
+                    }
                     for r in pren where r.account == a.label {
                         menu.addItem(renewalRow(r, providerName: p.name, accountLabels: labels))
                         shown.insert(r.service + "|" + r.account)
@@ -601,8 +608,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 addGroupedRenewals(orphans, providerName: "", baseLabels: [],
                                    menu: menu, shown: &shown)
             }
-            // Bonus cloud Max: solo se il server lo vede (tool personale).
-            if let c = snapshot?.credit {
+            // Ripiego: l'account del bonus non è in lista (non dovrebbe
+            // capitare: il login è sempre un account vdm). Solo allora la
+            // sezione a parte, che non duplica niente.
+            if let c = snapshot?.credit, !creditShown {
                 menu.addItem(sectionRow("Credito AI", providerId: nil))
                 menu.addItem(creditRow(c))
             }
