@@ -1,7 +1,7 @@
-// Hub crediti: usage dal vivo di OpenRouter, Resend, ElevenLabs — solo
-// endpoint documentati, niente stime. Chiavi dal Keychain dell'utente
-// (servizi sotto); senza chiave o senza permessi la sonda torna un
-// codice errore e il menu dice cosa fare. Niente dipendenze.
+// Hub crediti: usage dal vivo di OpenRouter ed ElevenLabs — solo endpoint
+// documentati, niente stime. Chiavi dal Keychain dell'utente (solo account
+// suoi, mai progetti altrui); senza dati la sonda torna un errore e il
+// server non la mostra. Niente dipendenze.
 import { execFile } from "node:child_process";
 
 const TIMEOUT_MS = 12000;
@@ -60,47 +60,6 @@ export async function probeOpenRouter() {
   if (status === 0) return { error: "timeout" };
   const parsed = status === 200 ? parseOpenRouter(data) : null;
   return parsed ?? { error: status === 401 ? "rejected" : `http${status}` };
-}
-
-// --- Resend: GET /usage → quote mensili (il tetto del piano) e giornaliere
-// solo se hanno un tetto (senza sono trivia). L'account è il suffisso del
-// servizio keychain (resend-<account>): l'API non dice email.
-export function parseResendUsage(data, label) {
-  if (!data || data.object !== "usage" || !data.emails?.monthly) return null;
-  const quotas = [];
-  const m = data.emails.monthly;
-  if (typeof m.used === "number" && typeof m.limit === "number") {
-    quotas.push({ key: "30g", used: m.used, limit: m.limit, unit: "",
-                  reset: m.resets_at ?? null, resetWord: null });
-  }
-  const g = data.emails.daily;
-  if (g && typeof g.used === "number" && typeof g.limit === "number") {
-    quotas.push({ key: "24h", used: g.used, limit: g.limit, unit: "",
-                  reset: g.resets_at ?? null, resetWord: null });
-  }
-  return quotas.length ? { label, quotas } : null;
-}
-
-export function classifyResendError(status, data) {
-  if (status === 0) return "timeout";
-  // Sul corpo serializzato, non sulle chiavi: il gateway ogni tanto
-  // manda chiavi con caratteri invisibili (viste dal vivo: la chiave
-  // c'è in Object.keys ma l'accesso per nome torna undefined).
-  if (status === 401 && /restricted_api_key/.test(JSON.stringify(data) ?? "")) return "sendonly";
-  if (status === 401) return "rejected";
-  return `http${status}`;
-}
-
-export async function probeResend() {
-  const svc = "resend-mooncircles";
-  const key = await keychain(svc);
-  if (!key) return { error: "nokey" };
-  const { status, data } = await get("https://api.resend.com/usage",
-    { Authorization: `Bearer ${key}` });
-  const parsed = status === 200
-    ? parseResendUsage(data, svc.replace(/^resend-/, ""))
-    : null;
-  return parsed ?? { error: classifyResendError(status, data) };
 }
 
 // --- ElevenLabs: /user/subscription → caratteri usati/limite + reset unix;

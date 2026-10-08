@@ -328,19 +328,6 @@ describe("hub", () => {
     assert.equal(parseOpenRouter({}), null);
     assert.equal(parseOpenRouter({ data: { usage: "x" } }), null);
   });
-  it("parseResendUsage: mensile sempre, giornaliera solo con tetto", async () => {
-    const { parseResendUsage } = await import("./probes/hub.mjs");
-    const doc = { object: "usage",
-      emails: { daily: { used: 25, limit: 100, resets_at: "2026-10-09T00:00:00.000Z" },
-                monthly: { used: 1200, limit: 3000, resets_at: "2026-11-01T00:00:00.000Z" } } };
-    const both = parseResendUsage(doc, "acme");
-    assert.equal(both.label, "acme");
-    assert.deepEqual(both.quotas.map((q) => q.key), ["30g", "24h"]);
-    const nocap = structuredClone(doc);
-    nocap.emails.daily.limit = null;
-    assert.deepEqual(parseResendUsage(nocap, "acme").quotas.map((q) => q.key), ["30g"]);
-    assert.equal(parseResendUsage({ object: "usage" }, "acme"), null);
-  });
   it("parseEleven: email o tier come label, unix come reset", async () => {
     const { parseEleven } = await import("./probes/hub.mjs");
     const sub = { character_count: 4500, character_limit: 10000,
@@ -351,18 +338,14 @@ describe("hub", () => {
     assert.equal(parseEleven(sub, null).label, "starter");
     assert.equal(parseEleven({}, null), null);
   });
-  it("classify: sendonly, noperm, timeout, http", async () => {
-    const { classifyResendError, classifyElevenError } = await import("./probes/hub.mjs");
-    assert.equal(classifyResendError(401, { name: "restricted_api_key" }), "sendonly");
-    assert.equal(classifyResendError(401, {}), "rejected");
-    assert.equal(classifyResendError(0, null), "timeout");
+  it("classify: noperm, timeout, http, chiavi invisibili", async () => {
+    const { classifyElevenError } = await import("./probes/hub.mjs");
+    assert.equal(classifyElevenError(0, null), "timeout");
     assert.equal(classifyElevenError(401, { Detail: { status: "missing_permissions" } }), "noperm");
     assert.equal(classifyElevenError(401, { Detail: { message: "missing the permission user_read" } }), "noperm");
-    const zwsp = JSON.parse('{"detail\\u200b":{"status":"missing_permissions"}}');
+    const zwsp = JSON.parse("{\"detail" + String.fromCharCode(8203) + "\":{\"status\":\"missing_permissions\"}}");
     assert.equal(zwsp.Detail, undefined);
     assert.equal(classifyElevenError(401, zwsp), "noperm");
-    const rzwsp = JSON.parse('{"name\\u200b":"restricted_api_key"}');
-    assert.equal(classifyResendError(401, rzwsp), "sendonly");
     assert.equal(classifyElevenError(500, null), "http500");
   });
   it("mapHub: detail coi numeri, flag hub, errori in chiaro", () => {
@@ -379,8 +362,6 @@ describe("hub", () => {
     const nolimit = { label: "T", quotas: [
       { key: "usd", used: 2, limit: null, unit: "$", reset: null, resetWord: null }] };
     assert.equal(mapHub("o", "O", nolimit).accounts[0].quotas[0].detail, "$2 spesi");
-    assert.equal(mapHub("r", "R", { error: "sendonly" }).error,
-      "serve chiave full-access (questa invia e basta)");
     assert.equal(mapHub("e", "E", { error: "noperm" }).error,
       "chiave senza permesso user_read");
     assert.equal(mapHub("x", "X", null).error, "no data");

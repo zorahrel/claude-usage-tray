@@ -19,8 +19,8 @@ Brand glyphs, 8px each, drawn from normalized assets:
   - **codex** via `codex app-server` JSON-RPC (needs the `codex` CLI),
   - **muse** via `server/muse_probe.py` (needs `python3`, Keychain token),
   - **hub credits** (menu only, never in the bar): **openrouter**,
-    **resend**, **elevenlabs** — live usage vs plan limit from each
-    vendor API, keys from your macOS Keychain (see below),
+    **elevenlabs** — live usage vs plan limit from each vendor API,
+    keys from your macOS Keychain (see below),
   - **cloud credit** from `~/bin/credito-cloud --json` when present
     (my own tool, optional — the menu section hides without it),
   - manual renewals from `server/renewals.json`.
@@ -36,23 +36,23 @@ section. Missing or failing → the section hides, nothing breaks.
 
 ## Hub credits (menu only)
 
-OpenRouter, Resend and ElevenLabs live in the dropdown with real
-numbers and reset times — usage vs plan limit, no estimates. Without
-a working key the row says what's missing instead of guessing.
+OpenRouter and ElevenLabs live in the dropdown with real numbers
+and reset times — usage vs plan limit, no estimates. Only providers
+with live data appear: without a working key there is no row at all.
 
 | Provider | Endpoint | Keychain service | Key scope |
 |---|---|---|---|
 | OpenRouter | `GET /api/v1/auth/key` | `openrouter` | any key (per-key `$` cap) |
-| Resend | `GET /usage` | `resend-<account>` | full access (sending-only keys get 401) |
 | ElevenLabs | `GET /user/subscription` | `elevenlabs` | needs `user_read` permission |
 
 ```sh
 security add-generic-password -s openrouter -w "<key>" -U
 ```
 
-Account labels come from each API (key name, tier, email); Resend uses
-the `resend-<account>` suffix. OpenAI/Anthropic API balances have no
-key-based endpoint and are deliberately not shown.
+Account labels come from each API (key name, tier, email). Only your
+own accounts belong here — no client or third-party projects.
+OpenAI/Anthropic API balances have no key-based endpoint and are
+deliberately not shown.
 
 ## Install
 

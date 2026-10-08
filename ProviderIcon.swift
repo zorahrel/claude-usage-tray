@@ -15,7 +15,6 @@ private let fallbackForProvider: [String: (String, NSColor)] = [
     "codex": ("O", .black),
     "muse": ("M", NSColor(red: 0x00 / 255, green: 0x82 / 255, blue: 0xFB / 255, alpha: 1)),
     "openrouter": ("O", .black),
-    "resend": ("R", .black),
     "elevenlabs": ("E", .black),
 ]
 

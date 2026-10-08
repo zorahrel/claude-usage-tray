@@ -9,7 +9,7 @@ import path from "node:path";
 import { probeCodex } from "./probes/codex.mjs";
 import { probeCloudCredits, creditAccount, saveLastGood, loadLastGood,
          loadCreditMap, saveCreditMap, mergeCreditMap } from "./probes/cloud-credit.mjs";
-import { probeOpenRouter, probeResend, probeEleven } from "./probes/hub.mjs";
+import { probeOpenRouter, probeEleven } from "./probes/hub.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3337;
@@ -162,7 +162,6 @@ export function shortNum(n) {
 
 const HUB_ERRORS = {
   nokey: "chiave assente nel keychain",
-  sendonly: "serve chiave full-access (questa invia e basta)",
   noperm: "chiave senza permesso user_read",
   rejected: "chiave rifiutata",
   timeout: "timeout",
@@ -214,12 +213,11 @@ async function overview() {
   // vdm prima (locale, millisecondi): i nomi dei profili servono alla
   // sonda multipla. Il resto in parallelo: in sequenza supera i 55s della tray.
   const vdm = await fetchVdm().catch(() => null);
-  const [cx, museOut, probed, orOut, reOut, elOut] = await Promise.all([
+  const [cx, museOut, probed, orOut, elOut] = await Promise.all([
     probeCodex(),
     runProbe("muse_probe.py"),
     probeCloudCredits(vdm ? bonusTargets(vdm) : []),
     probeOpenRouter(),
-    probeResend(),
     probeEleven(),
   ]);
   const providers = [];
@@ -228,9 +226,10 @@ async function overview() {
     : { id: "claude", name: "Claude", error: "vdm offline" });
   providers.push(mapQuotas(cx, "codex", "Codex", "codex", "Codex", cx?.email));
   providers.push(mapMuse(museOut));
-  providers.push(mapHub("openrouter", "OpenRouter", orOut));
-  providers.push(mapHub("resend", "Resend", reOut));
-  providers.push(mapHub("elevenlabs", "ElevenLabs", elOut));
+  // Hub: solo con dati veri (niente righe d'errore, niente progetti altrui).
+  for (const [id, name, out] of [["openrouter", "OpenRouter", orOut], ["elevenlabs", "ElevenLabs", elOut]]) {
+    if (out && !out.error) providers.push(mapHub(id, name, out));
+  }
   const login = creditAccount();
   const merged = mergeCredit(probed.find((p) => p.account === login) ?? null, loadLastGood());
   if (merged.save) saveLastGood(merged.save);
