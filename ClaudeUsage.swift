@@ -393,7 +393,12 @@ func renewalRow(_ r: Renewal, providerName: String = "", accountLabels: Set<Stri
     label.frame = NSRect(x: 38, y: 4, width: 196, height: 15)
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
-    let detail = [r.amount, r.renewsAt.map { "↻ \(shortDate($0))" } ?? r.cycle].joined(separator: " · ")
+    // Costo ricorrente, non saldo: "/mese" lo dice al volo (il bonus non ce l'ha).
+    let rate = r.amount
+        + (r.cycle == "mensile" ? "/mese" : r.cycle == "annuale" ? "/anno" : "")
+    let when = r.renewsAt.map { "↻ \(shortDate($0))" }
+        ?? (r.cycle == "mensile" || r.cycle == "annuale" ? "" : r.cycle)
+    let detail = [rate, when].filter { !$0.isEmpty }.joined(separator: " · ")
     let right = NSTextField(labelWithString: detail)
     right.font = .systemFont(ofSize: 10.5)
     right.textColor = .tertiaryLabelColor
@@ -420,6 +425,8 @@ func creditRow(_ c: CloudCredit) -> NSMenuItem {
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
     let detail: String
+    // Soldi in mano, non costo: verde (rosso sotto il 20%: agli sgoccioli).
+    var valueColor: NSColor = .tertiaryLabelColor
     if let left = c.remaining {
         let amount = String(format: "$%.2f", left)
             + (c.limit.map { String(format: " di $%.0f", $0) } ?? "")
@@ -427,14 +434,19 @@ func creditRow(_ c: CloudCredit) -> NSMenuItem {
         if c.stale == true, let at = c.asOf { parts.append(staleAge(at)) }
         if let r = c.renewsAt { parts.append("scade \(shortDate(r))") }
         detail = parts.joined(separator: " · ")
+        if let lim = c.limit, lim > 0, left < lim * 0.2 {
+            valueColor = .systemRed
+        } else {
+            valueColor = .systemGreen
+        }
     } else if c.reason == "token" {
         detail = "token scaduto · apri Claude Code"
     } else {
         detail = "in aggiornamento…"
     }
     let right = NSTextField(labelWithString: detail)
+    right.textColor = valueColor
     right.font = .systemFont(ofSize: 10.5)
-    right.textColor = .tertiaryLabelColor
     right.alignment = .right
     right.frame = NSRect(x: 238, y: 4, width: menuW - 254, height: 15)
     view.addSubview(right)
