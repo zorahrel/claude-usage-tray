@@ -1,7 +1,7 @@
 // node --test server/test.mjs — nessun framework, solo node:test.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, code3 } from "./server.mjs";
+import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, code3, mergeCredit } from "./server.mjs";
 import { parseCloudCredit } from "./probes/cloud-credit.mjs";
 import { EventEmitter } from "node:events";
 import { rpc } from "./probes/codex.mjs";
@@ -160,6 +160,48 @@ describe("parseCloudCredit", () => {
       JSON.stringify({ oauthAccount: { emailAddress: "ada@example.com" } }));
     assert.equal(creditAccount(home), "ada@example.com");
     assert.equal(creditAccount(home + "-missing"), null);
+  });
+  it("lastGood: scrive e rilegge con stale+asOf, scade dopo 6h", async () => {
+    const { saveLastGood, loadLastGood } = await import("./probes/cloud-credit.mjs");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tray-lg-")), "last.json");
+    const v = { remaining: 74.4, limit: 250, renewsAt: "2026-11-05", account: "a@b.c" };
+    assert.equal(loadLastGood(p), null);
+    saveLastGood(v, p);
+    const back = loadLastGood(p);
+    assert.equal(back.remaining, 74.4);
+    assert.equal(back.stale, true);
+    assert.equal(typeof back.asOf, "number");
+    assert.equal(loadLastGood(p, Date.now() + 7 * 3600 * 1000), null);
+  });
+  it("reasonForFailure: token, 429, generico", async () => {
+    const { reasonForFailure } = await import("./probes/cloud-credit.mjs");
+    assert.equal(reasonForFailure({ code: 3 }, "", ""), "token");
+    assert.equal(reasonForFailure({ code: 1 }, "", "HTTP 429 da api"), "limited");
+    assert.equal(reasonForFailure({ code: 1 }, "boom", ""), "error");
+    assert.equal(reasonForFailure(null, "testo", ""), "error");
+  });
+  it("nobonusQuiet: vale solo per quel login", async () => {
+    const { nobonusQuiet } = await import("./probes/cloud-credit.mjs");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tray-nb-")), "nb");
+    fs.writeFileSync(p, `a@b.c|${Date.now()}`);
+    assert.equal(nobonusQuiet("a@b.c", p), true);
+    assert.equal(nobonusQuiet("x@y.z", p), false);
+  });
+  it("mergeCredit: live salva, stantio ripiega, il resto passa", () => {
+    const live = { remaining: 10 };
+    const stale = { remaining: 9, stale: true };
+    const una = { unavailable: true };
+    assert.deepEqual(mergeCredit(live, stale), { credit: live, save: live });
+    assert.deepEqual(mergeCredit(una, stale), { credit: stale, save: null });
+    assert.deepEqual(mergeCredit(una, null), { credit: una, save: null });
+    assert.deepEqual(mergeCredit(null, stale), { credit: stale, save: null });
+    assert.deepEqual(mergeCredit(null, null), { credit: null, save: null });
   });
   it("liveQuiet: fresco tace, vecchio o mancante riprova", async () => {
     const { liveQuiet } = await import("./probes/cloud-credit.mjs");

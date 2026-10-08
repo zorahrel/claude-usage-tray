@@ -15,6 +15,16 @@ struct CloudCredit: Codable {
     let renewsAt: String?
     let account: String?
     let unavailable: Bool?
+    let stale: Bool?
+    let asOf: Int?
+    let reason: String?
+}
+
+// Età di un saldo stantio: "5m fa", "2h fa". Mai il futuro (orologi storti).
+func staleAge(_ asOf: Int) -> String {
+    let mins = max(0, Int(Date().timeIntervalSince1970) - asOf) / 60
+    if mins < 60 { return "\(mins)m fa" }
+    return "\(mins / 60)h fa"
 }
 
 struct Provider: Codable {
@@ -413,8 +423,12 @@ func creditRow(_ c: CloudCredit) -> NSMenuItem {
     if let left = c.remaining {
         let amount = String(format: "$%.2f", left)
             + (c.limit.map { String(format: " di $%.0f", $0) } ?? "")
-        detail = [amount, c.renewsAt.map { "scade \(shortDate($0))" } ?? ""]
-            .filter { !$0.isEmpty }.joined(separator: " · ")
+        var parts = [amount]
+        if c.stale == true, let at = c.asOf { parts.append(staleAge(at)) }
+        if let r = c.renewsAt { parts.append("scade \(shortDate(r))") }
+        detail = parts.joined(separator: " · ")
+    } else if c.reason == "token" {
+        detail = "token scaduto · apri Claude Code"
     } else {
         detail = "in aggiornamento…"
     }

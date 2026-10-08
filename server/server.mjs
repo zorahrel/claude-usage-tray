@@ -7,7 +7,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { probeCodex } from "./probes/codex.mjs";
-import { probeCloudCredit } from "./probes/cloud-credit.mjs";
+import { probeCloudCredit, saveLastGood, loadLastGood } from "./probes/cloud-credit.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3337;
@@ -137,22 +137,36 @@ function mapQuotas(out, id, name, accountId, accountLabel, email = null) {
     active: true, status: statusFor(worst, null), quotas }] };
 }
 
+// Decide la riga credito: live → salva e serve; in mancanza → stantio
+// con età (anche se il tool è sparito: l'età dice quanto vale); senza
+// niente → riga "in aggiornamento" o sezione nascosta.
+export function mergeCredit(probe, last) {
+  if (probe && !probe.unavailable) return { credit: probe, save: probe };
+  if (last) return { credit: last, save: null };
+  return { credit: probe, save: null };
+}
+
 async function overview() {
   let renewals = [];
   try {
     renewals = filterRenewals(JSON.parse(await readFile(path.join(DIR, "renewals.json"), "utf8")));
   } catch { /* resta vuoto */ }
+  // Paralleli: in sequenza il peggio (5+30+25+25s) supera i 55s della tray.
+  const [vdm, cx, museOut, probed] = await Promise.all([
+    fetchVdm().catch(() => null),
+    probeCodex(),
+    runProbe("muse_probe.py"),
+    probeCloudCredit(),
+  ]);
   const providers = [];
-  try {
-    providers.push(mapClaude(await fetchVdm()));
-  } catch (e) {
-    providers.push({ id: "claude", name: "Claude", error: "vdm offline" });
-  }
-  const cx = await probeCodex();
+  providers.push(vdm
+    ? mapClaude(vdm)
+    : { id: "claude", name: "Claude", error: "vdm offline" });
   providers.push(mapQuotas(cx, "codex", "Codex", "codex", "Codex", cx?.email));
-  providers.push(mapMuse(await runProbe("muse_probe.py")));
-  const credit = await probeCloudCredit();
-  return { ok: true, at: Date.now(), providers, renewals, credit };
+  providers.push(mapMuse(museOut));
+  const merged = mergeCredit(probed, loadLastGood());
+  if (merged.save) saveLastGood(merged.save);
+  return { ok: true, at: Date.now(), providers, renewals, credit: merged.credit };
 }
 
 function filterRenewals(list) {
@@ -161,12 +175,16 @@ function filterRenewals(list) {
 
 let cache = { at: 0, body: null };
 const CACHE_MS = 45000;
+let inflight = null; // una sola overview in volo: niente probe doppie
 
 const server = http.createServer(async (req, res) => {
   if (req.url === "/api/overview") {
     try {
       if (!cache.body || Date.now() - cache.at > CACHE_MS) {
-        cache = { at: Date.now(), body: JSON.stringify(await overview()) };
+        inflight ??= overview().then(
+          (o) => { cache = { at: Date.now(), body: JSON.stringify(o) }; },
+        ).finally(() => { inflight = null; });
+        await inflight;
       }
       const body = cache.body;
       res.writeHead(200, { "Content-Type": "application/json" });
