@@ -1,10 +1,11 @@
 // Bonus cloud Max ($250 una tantum): saldo vivo da `credito-cloud --json`
-// (tool personale in ~/bin, non committato). Vivo o niente: il bucket in
+// (tool personale in ~/bin, non committato), un giro con CLOUD_ACCOUNT per
+// ogni profilo Max in vdm. Vivo o niente: il bucket in
 // ~/.claude.json è fermo da giorni, quindi niente fallback su file stantio.
 // Ultimo buono su /tmp (max 6h) con età; assente → sezione nascosta.
 // Niente dipendenze.
 import { execFile } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -16,6 +17,13 @@ const NOBONUS_PATH = "/tmp/usage-credit-nobonus"; // "email|ts": login senza bon
 const NOBONUS_MS = 900000;
 const LAST_PATH = "/tmp/usage-credit-last.json"; // ultimo buono, max 6h
 const LAST_TTL_MS = 6 * 3600 * 1000;
+// Marcatori per profilo vdm: condividerli attribuirebbe a un account il
+// saldo dell'altro. Il giro senza nome usa i percorsi storici.
+const tag = (base, name) => (name ? `${base}-${name}` : base);
+// Ultimo buono PER ACCOUNT (la sonda legge solo il login corrente, che
+// ruota): email → {remaining, limit, used, renewsAt, asOf} oppure
+// {nobonus: true, asOf}. Senza scadenza: si mostra con la sua età.
+const CREDIT_MAP_PATH = path.join(os.homedir(), ".cache", "claude-usage-tray", "credit-last.json");
 
 export function parseCloudCredit(out) {
   const b = out?.iguana_necktie;
@@ -96,6 +104,57 @@ export function nobonusQuiet(login, p = NOBONUS_PATH, now = Date.now()) {
   }
 }
 
+export function loadCreditMap(mapPath = CREDIT_MAP_PATH) {
+  try {
+    const m = JSON.parse(readFileSync(mapPath, "utf8"));
+    if (!m || typeof m !== "object" || Array.isArray(m)) return {};
+    return m;
+  } catch {
+    return {};
+  }
+}
+
+export function saveCreditMap(map, mapPath = CREDIT_MAP_PATH) {
+  try {
+    mkdirSync(path.dirname(mapPath), { recursive: true });
+    writeFileSync(mapPath, JSON.stringify(map));
+  } catch { /* cache non scrivibile: solo live, nessun danno */ }
+}
+
+// Fonde l'esito della sonda nella mappa: live → scrive (fresco) o fissa
+// l'età se è cache recente; nobonus → segna l'account senza bonus; il
+// resto (429, token, tool assente) non tocca niente. Ogni voce non letta
+// in questo giro esce con stale: true, pronta per la tray.
+export function mergeCreditMap(map, probed, nowSec = Math.floor(Date.now() / 1000)) {
+  const next = { ...(map && typeof map === "object" && !Array.isArray(map) ? map : {}) };
+  const acct = probed?.account;
+  const keyed = typeof acct === "string" && acct.includes("@") ? acct : null;
+  let liveLogin = null;
+  let changed = false;
+  if (keyed && probed && typeof probed.remaining === "number") {
+    if (!probed.stale) {
+      next[keyed] = { remaining: probed.remaining, limit: probed.limit ?? null,
+        used: probed.used ?? null, renewsAt: probed.renewsAt ?? null, asOf: nowSec };
+      liveLogin = keyed;
+      changed = true;
+    } else if (!next[keyed]) {
+      next[keyed] = { remaining: probed.remaining, limit: probed.limit ?? null,
+        used: probed.used ?? null, renewsAt: probed.renewsAt ?? null,
+        asOf: typeof probed.asOf === "number" ? probed.asOf : nowSec };
+      changed = true;
+    }
+  } else if (keyed && probed?.nobonus) {
+    next[keyed] = { nobonus: true, asOf: nowSec };
+    changed = true;
+  }
+  const credits = {};
+  for (const [email, e] of Object.entries(next)) {
+    if (!e || typeof e !== "object") continue;
+    credits[email] = { ...e, stale: email !== liveLogin };
+  }
+  return { map: next, credits, changed };
+}
+
 export function saveLastGood(value, lastPath = LAST_PATH) {
   try {
     writeFileSync(lastPath, JSON.stringify({ at: Date.now(), value }));
@@ -116,48 +175,62 @@ export function loadLastGood(lastPath = LAST_PATH, now = Date.now()) {
 // Il bonus è di chi l'ha riscosso (lastGood): se il login corrente è un
 // altro e il live fallisce, non mostrargli una riga "in aggiornamento"
 // per un bonus che non ha — si nasconde e basta.
-function ownedByOther(login) {
+function ownedByOther(login, lastPath) {
   if (!login) return false;
-  const last = loadLastGood();
+  const last = loadLastGood(lastPath);
   return !!(last?.account && last.account !== login);
 }
 
-export async function probeCloudCredit() {
+// Un giro per ogni profilo Max: senza vdm, un giro solo sul login corrente.
+// In sequenza: un 429 strozza tutti insieme.
+export async function probeCloudCredits(targets) {
+  const list = targets.length ? targets : [{ name: null, email: creditAccount() }];
+  const out = [];
+  for (const t of list) {
+    const item = await probeOne(t.name, t.email);
+    if (item) out.push(item);
+  }
+  return out;
+}
+
+async function probeOne(name, email) {
   const bin = path.join(os.homedir(), "bin", "credito-cloud");
   if (!existsSync(bin)) return null; // tool assente: sezione nascosta
-  const login = creditAccount();
-  if (isFresh(FRESH_PATH, FRESH_MS)) {
-    const lg = loadLastGood(); // saldo di pochi minuti fa, con età
+  if (isFresh(tag(FRESH_PATH, name), FRESH_MS)) {
+    const lg = loadLastGood(tag(LAST_PATH, name)); // saldo di pochi minuti fa, con età
     if (lg) return lg;
   }
-  if (login && nobonusQuiet(login)) return null;
-  if (liveQuiet()) {
-    return ownedByOther(login) ? null : { unavailable: true, account: login };
+  if (email && nobonusQuiet(email, tag(NOBONUS_PATH, name))) return { nobonus: true, account: email };
+  if (liveQuiet(tag(QUIET_PATH, name))) {
+    return ownedByOther(email, tag(LAST_PATH, name)) ? null : { unavailable: true, account: email };
   }
+  const env = name ? { ...process.env, CLOUD_ACCOUNT: name } : process.env;
   const res = await new Promise((resolve) => {
-    execFile(bin, ["--json"], { timeout: 25000 }, (err, stdout, stderr) => {
+    execFile(bin, ["--json"], { timeout: 25000, env }, (err, stdout, stderr) => {
       resolve(err ? { err, stdout, stderr } : { err: null, stdout, stderr });
     });
   });
-  // Attribuzione al login pre-fetch: il token letto dal tool è il suo anche
-  // se vdm ruota in questi millisecondi (race accettata, si corregge al poll).
+  // Attribuzione pre-fetch: il token letto dal tool è di questo account
+  // anche se vdm ruota in questi millisecondi (si corregge al poll).
   if (res.err) {
-    mark(QUIET_PATH);
-    if (ownedByOther(login)) return null;
-    return { unavailable: true, account: login,
+    mark(tag(QUIET_PATH, name));
+    if (ownedByOther(email, tag(LAST_PATH, name))) return null;
+    return { unavailable: true, account: email,
              reason: reasonForFailure(res.err, res.stdout, res.stderr) };
   }
   const c = classifyCreditOutput(res.stdout);
   if (c.kind === "live") {
-    mark(FRESH_PATH);
-    return { ...c.value, account: login };
+    mark(tag(FRESH_PATH, name));
+    const item = { ...c.value, account: email };
+    saveLastGood(item, tag(LAST_PATH, name));
+    return item;
   }
   if (c.kind === "nobonus") {
-    if (login) mark(NOBONUS_PATH, `${login}|${Date.now()}`);
-    return null;
+    if (email) mark(tag(NOBONUS_PATH, name), `${email}|${Date.now()}`);
+    return { nobonus: true, account: email };
   }
-  mark(QUIET_PATH);
-  if (ownedByOther(login)) return null;
-  return { unavailable: true, account: login,
+  mark(tag(QUIET_PATH, name));
+  if (ownedByOther(email, tag(LAST_PATH, name))) return null;
+  return { unavailable: true, account: email,
            reason: reasonForFailure(null, res.stdout, res.stderr) };
 }

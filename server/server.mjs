@@ -7,7 +7,8 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { probeCodex } from "./probes/codex.mjs";
-import { probeCloudCredit, saveLastGood, loadLastGood } from "./probes/cloud-credit.mjs";
+import { probeCloudCredits, creditAccount, saveLastGood, loadLastGood,
+         loadCreditMap, saveCreditMap, mergeCreditMap } from "./probes/cloud-credit.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3337;
@@ -141,22 +142,35 @@ function mapQuotas(out, id, name, accountId, accountLabel, email = null) {
 // con età (anche se il tool è sparito: l'età dice quanto vale); senza
 // niente → riga "in aggiornamento" o sezione nascosta.
 export function mergeCredit(probe, last) {
-  if (probe && !probe.unavailable) return { credit: probe, save: probe };
+  if (probe && !probe.unavailable && !probe.nobonus) return { credit: probe, save: probe };
   if (last) return { credit: last, save: null };
-  return { credit: probe, save: null };
+  if (probe?.unavailable) return { credit: probe, save: null };
+  return { credit: null, save: null };
+}
+
+// Profili vdm con Max: il bonus cloud spetta a ognuno, la sonda li gira
+// tutti via CLOUD_ACCOUNT. Senza vdm: un giro sul login corrente.
+export function bonusTargets(vdm) {
+  return (vdm?.profiles ?? [])
+    .filter((p) => p?.subscriptionType === "max" && p?.name && p?.label)
+    .map((p) => ({ name: p.name, email: p.label }));
 }
 
 async function overview() {
   let renewals = [];
   try {
-    renewals = filterRenewals(JSON.parse(await readFile(path.join(DIR, "renewals.json"), "utf8")));
+    // Tutte, anche tray:false: le righe Abbonamento sotto gli account
+    // live le usano comunque, la tray nasconde solo orfani e gruppi.
+    const raw = JSON.parse(await readFile(path.join(DIR, "renewals.json"), "utf8"));
+    renewals = Array.isArray(raw) ? raw : [];
   } catch { /* resta vuoto */ }
-  // Paralleli: in sequenza il peggio (5+30+25+25s) supera i 55s della tray.
-  const [vdm, cx, museOut, probed] = await Promise.all([
-    fetchVdm().catch(() => null),
+  // vdm prima (locale, millisecondi): i nomi dei profili servono alla
+  // sonda multipla. Il resto in parallelo: in sequenza supera i 55s della tray.
+  const vdm = await fetchVdm().catch(() => null);
+  const [cx, museOut, probed] = await Promise.all([
     probeCodex(),
     runProbe("muse_probe.py"),
-    probeCloudCredit(),
+    probeCloudCredits(vdm ? bonusTargets(vdm) : []),
   ]);
   const providers = [];
   providers.push(vdm
@@ -164,9 +178,23 @@ async function overview() {
     : { id: "claude", name: "Claude", error: "vdm offline" });
   providers.push(mapQuotas(cx, "codex", "Codex", "codex", "Codex", cx?.email));
   providers.push(mapMuse(museOut));
-  const merged = mergeCredit(probed, loadLastGood());
+  const login = creditAccount();
+  const merged = mergeCredit(probed.find((p) => p.account === login) ?? null, loadLastGood());
   if (merged.save) saveLastGood(merged.save);
-  return { ok: true, at: Date.now(), providers, renewals, credit: merged.credit };
+  let cmap = mergeCreditMap(loadCreditMap(), null);
+  const liveNow = new Set();
+  for (const item of probed) {
+    cmap = mergeCreditMap(cmap.map, item);
+    if (cmap.changed) saveCreditMap(cmap.map);
+    if (item && typeof item.remaining === "number" && !item.stale &&
+        typeof item.account === "string" && item.account.includes("@")) liveNow.add(item.account);
+  }
+  // Ogni merge segna fresco solo il suo giro: il poll ne ha fatti tanti.
+  for (const email of liveNow) {
+    if (cmap.credits[email]) cmap.credits[email] = { ...cmap.credits[email], stale: false };
+  }
+  return { ok: true, at: Date.now(), providers, renewals,
+           credit: merged.credit, credits: cmap.credits };
 }
 
 function filterRenewals(list) {

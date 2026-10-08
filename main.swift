@@ -3,6 +3,16 @@ import Cocoa
 // Punto di ingresso: deve stare in main.swift perché l'app ora è multi-file
 // (ClaudeUsage.swift + ProviderIcon.swift).
 
+// Prova visiva: stesso menu del clic in un PNG, senza toccare la barra.
+// Prima del lock single-instance: lo snapshot gira accanto alla tray vera.
+if let i = CommandLine.arguments.firstIndex(of: "--snapshot") {
+    guard i + 1 < CommandLine.arguments.count else {
+        FileHandle.standardError.write("uso: ClaudeUsage --snapshot <file.png>\n".data(using: .utf8)!)
+        exit(2)
+    }
+    runSnapshotAndExit(path: CommandLine.arguments[i + 1])
+}
+
 // Single instance guard via an advisory lock on the pidfile.
 //
 // A bare `kill(pid, 0)` is not a liveness test: macOS recycles PIDs, so a stale

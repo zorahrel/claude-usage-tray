@@ -7,14 +7,17 @@ struct Overview: Codable {
     let providers: [Provider]
     let renewals: [Renewal]
     let credit: CloudCredit?
+    let credits: [String: CloudCredit]?
 }
 
 struct CloudCredit: Codable {
     let remaining: Double?
     let limit: Double?
+    let used: Double?
     let renewsAt: String?
     let account: String?
     let unavailable: Bool?
+    let nobonus: Bool?
     let stale: Bool?
     let asOf: Int?
     let reason: String?
@@ -59,6 +62,7 @@ struct Renewal: Codable {
     let renewsAt: String?
     let note: String
     let provider: String?
+    let tray: Bool?
 }
 
 func statusColor(_ s: String) -> NSColor {
@@ -267,7 +271,7 @@ private extension Int {
 
 // MARK: - Menu rows
 
-private let menuW: CGFloat = 400
+private let menuW: CGFloat = 440
 
 func headerRow(_ text: String) -> NSMenuItem {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 20))
@@ -300,12 +304,12 @@ func sectionRow(_ text: String, providerId: String?) -> NSMenuItem {
     return item
 }
 
-func shortDate(_ iso: String) -> String {
+// Data compatta per le righe Abbonamento/Bonus: "2026-11-06" → "06/11".
+func dayMonth(_ iso: String) -> String {
     let parts = iso.split(separator: "-")
     guard parts.count == 3, let m = Int(parts[1]), (1...12).contains(m),
-          let d = Int(parts[2]) else { return iso }
-    let mesi = ["", "gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"]
-    return "\(d) \(mesi[m])"
+          let d = Int(parts[2]), (1...31).contains(d) else { return iso }
+    return String(format: "%02d/%02d", d, m)
 }
 
 func accountRow(_ a: Account) -> NSMenuItem {
@@ -376,13 +380,15 @@ func quotaBarRow(_ q: Quota) -> NSMenuItem {
     return item
 }
 
-func renewalRow(_ r: Renewal, providerName: String = "", accountLabels: Set<String> = []) -> NSMenuItem {
+// Riga Abbonamento: costo, non saldo. Il prefisso la distingue dalla riga
+// Bonus cloud a colpo d'occhio; la destra resta tenue come prima.
+func subscriptionRow(_ r: Renewal, providerName: String = "", accountLabels: Set<String> = []) -> NSMenuItem {
     // Sotto l'header del provider non ripetere né il suo nome né gli account già elencati sopra.
     var service = r.service
     if !providerName.isEmpty, service.lowercased().hasPrefix(providerName.lowercased() + " ") {
         service = String(service.dropFirst(providerName.count + 1))
     }
-    var text = service
+    var text = "Abbonamento \(service)"
     if !r.account.isEmpty, r.account != r.service, !accountLabels.contains(r.account) {
         text += " — \(r.account)"
     }
@@ -390,20 +396,30 @@ func renewalRow(_ r: Renewal, providerName: String = "", accountLabels: Set<Stri
     let label = NSTextField(labelWithString: text)
     label.font = .systemFont(ofSize: 10.5)
     label.textColor = .secondaryLabelColor
-    label.frame = NSRect(x: 38, y: 4, width: 196, height: 15)
+    label.frame = NSRect(x: 38, y: 4, width: 150, height: 15)
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
-    // Costo ricorrente, non saldo: "/mese" lo dice al volo (il bonus non ce l'ha).
-    let rate = r.amount
-        + (r.cycle == "mensile" ? "/mese" : r.cycle == "annuale" ? "/anno" : "")
-    let when = r.renewsAt.map { "↻ \(shortDate($0))" }
-        ?? (r.cycle == "mensile" || r.cycle == "annuale" ? "" : r.cycle)
-    let detail = [rate, when].filter { !$0.isEmpty }.joined(separator: " · ")
+    let detail: String
+    switch r.cycle {
+    case "mensile":
+        detail = r.amount + "/mese"
+            + (r.renewsAt.map { " · rinnova \(dayMonth($0))" } ?? "")
+    case "annuale":
+        detail = r.amount + "/anno"
+            + (r.renewsAt.map { " · rinnova \(dayMonth($0))" } ?? "")
+    case "una tantum":
+        detail = "\(r.amount) una tantum"
+    case "disdetto":
+        detail = "disdetto" + (r.renewsAt.map { " · \(dayMonth($0))" } ?? "")
+    default:
+        detail = [r.amount, r.renewsAt.map { "↻ \(dayMonth($0))" } ?? "", r.cycle]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    }
     let right = NSTextField(labelWithString: detail)
     right.font = .systemFont(ofSize: 10.5)
     right.textColor = .tertiaryLabelColor
     right.alignment = .right
-    right.frame = NSRect(x: 238, y: 4, width: menuW - 254, height: 15)
+    right.frame = NSRect(x: 192, y: 4, width: menuW - 208, height: 15)
     view.addSubview(right)
     let item = NSMenuItem()
     item.view = view
@@ -411,33 +427,51 @@ func renewalRow(_ r: Renewal, providerName: String = "", accountLabels: Set<Stri
     return item
 }
 
-// Riga del bonus cloud: stesso scheletro di renewalRow (label + dettaglio).
+// Account live senza voce in renewals.json: il buco si vede, in grigio.
+func unregisteredRow() -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
+    let label = NSTextField(labelWithString: "Abbonamento")
+    label.font = .systemFont(ofSize: 10.5)
+    label.textColor = .tertiaryLabelColor
+    label.frame = NSRect(x: 38, y: 4, width: 150, height: 15)
+    view.addSubview(label)
+    let right = NSTextField(labelWithString: "non registrato")
+    right.font = .systemFont(ofSize: 10.5)
+    right.textColor = .tertiaryLabelColor
+    right.alignment = .right
+    right.frame = NSRect(x: 192, y: 4, width: menuW - 208, height: 15)
+    view.addSubview(right)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+// Riga del bonus cloud: saldo ("rimasti su"), mai costo. La destra è verde
+// attenuato contro il grigio tenue dell'abbonamento: non si confondono.
 // Senza saldo (throttle 429) la riga resta e dice che aggiorna: sparire
 // e riapparire confonde più di un'attesa dichiarata.
-func creditRow(_ c: CloudCredit) -> NSMenuItem {
+func creditRow(_ c: CloudCredit, email: String? = nil) -> NSMenuItem {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
-    var title = "Bonus cloud Max"
-    if let email = c.account, !email.isEmpty { title += " — \(email)" }
+    var title = "Bonus cloud"
+    if let email = email, !email.isEmpty { title += " — \(email)" }
     let label = NSTextField(labelWithString: title)
     label.font = .systemFont(ofSize: 10.5)
     label.textColor = .secondaryLabelColor
-    label.frame = NSRect(x: 38, y: 4, width: 196, height: 15)
+    label.frame = NSRect(x: 38, y: 4, width: 150, height: 15)
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
     let detail: String
-    // Soldi in mano, non costo: verde (rosso sotto il 20%: agli sgoccioli).
     var valueColor: NSColor = .tertiaryLabelColor
     if let left = c.remaining {
-        let amount = String(format: "$%.2f", left)
-            + (c.limit.map { String(format: " di $%.0f", $0) } ?? "")
-        var parts = [amount]
+        var parts = [String(format: "$%.2f rimasti", left)
+            + (c.limit.map { String(format: " su $%.0f", $0) } ?? "")]
+        if let r = c.renewsAt { parts.append("scade \(dayMonth(r))") }
         if c.stale == true, let at = c.asOf { parts.append(staleAge(at)) }
-        if let r = c.renewsAt { parts.append("scade \(shortDate(r))") }
         detail = parts.joined(separator: " · ")
         if let lim = c.limit, lim > 0, left < lim * 0.2 {
             valueColor = .systemRed
         } else {
-            valueColor = .systemGreen
+            valueColor = .systemGreen.withAlphaComponent(0.8)
         }
     } else if c.reason == "token" {
         detail = "token scaduto · apri Claude Code"
@@ -448,7 +482,7 @@ func creditRow(_ c: CloudCredit) -> NSMenuItem {
     right.textColor = valueColor
     right.font = .systemFont(ofSize: 10.5)
     right.alignment = .right
-    right.frame = NSRect(x: 238, y: 4, width: menuW - 254, height: 15)
+    right.frame = NSRect(x: 192, y: 4, width: menuW - 208, height: 15)
     view.addSubview(right)
     let item = NSMenuItem()
     item.view = view
@@ -471,8 +505,10 @@ func emailRow(_ email: String) -> NSMenuItem {
 
 // Rinnovi raggruppati per email con la sua intestazione; le righe
 // auto-nominate (service == account) restano da sole senza intestazione.
+// Qui tray:false resta nascosto: sotto gli account live si usa comunque.
 func addGroupedRenewals(_ rows: [Renewal], providerName: String, baseLabels: Set<String>,
                         menu: NSMenu, shown: inout Set<String>) {
+    let rows = rows.filter { $0.tray != false }
     var keys: [String] = []
     for r in rows where !shown.contains(r.service + "|" + r.account) {
         if !keys.contains(r.account) { keys.append(r.account) }
@@ -481,14 +517,14 @@ func addGroupedRenewals(_ rows: [Renewal], providerName: String, baseLabels: Set
         let rs = rows.filter { $0.account == k && !shown.contains($0.service + "|" + $0.account) }
         if rs.allSatisfy({ $0.service == $0.account }) {
             for r in rs {
-                menu.addItem(renewalRow(r, providerName: providerName, accountLabels: baseLabels))
+                menu.addItem(subscriptionRow(r, providerName: providerName, accountLabels: baseLabels))
                 shown.insert(r.service + "|" + r.account)
             }
         } else {
             menu.addItem(emailRow(k))
             for r in rs {
-                menu.addItem(renewalRow(r, providerName: providerName,
-                                        accountLabels: baseLabels.union([k])))
+                menu.addItem(subscriptionRow(r, providerName: providerName,
+                                              accountLabels: baseLabels.union([k])))
                 shown.insert(r.service + "|" + r.account)
             }
         }
@@ -517,6 +553,203 @@ func infoRow(_ text: String) -> NSMenuItem {
     let item = NSMenuItem()
     item.view = view
     return item
+}
+
+// MARK: - Menu (clic e snapshot usano la stessa costruzione)
+
+// Mappa dei bonus per email: credits del server nuovo, o il singolo credit
+// del server vecchio. Senza: nessun bonus da mostrare.
+func creditMap(_ snapshot: Overview?) -> [String: CloudCredit] {
+    if let cs = snapshot?.credits { return cs }
+    if let c = snapshot?.credit, let email = c.account, !email.isEmpty {
+        return [email: c]
+    }
+    return [:]
+}
+
+func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -> NSMenu {
+    let menu = NSMenu()
+    menu.autoenablesItems = false
+    menu.addItem(headerRow("Usage"))
+    if isOffline {
+        menu.addItem(infoRow("⚡ Offline — cannot reach usage-server :3337"))
+    } else {
+        menu.addItem(legendRow("Nella barra: 5H sopra, 7D sotto · % e tempo di reset per quota"))
+        menu.addItem(legendRow("Account affievolito: non attivo · ↻: reset o rinnovo"))
+        let providers = snapshot?.providers ?? []
+        let renewals = snapshot?.renewals ?? []
+        let cmap = creditMap(snapshot)
+        var shown = Set<String>()
+        var bonusShown = Set<String>()
+        for p in providers {
+            menu.addItem(sectionRow(p.name, providerId: p.id))
+            let accs = p.accounts ?? []
+            if let err = p.error {
+                menu.addItem(infoRow("\(p.name): \(err)"))
+            } else if accs.isEmpty {
+                menu.addItem(infoRow("nessun account"))
+            }
+            let labels = Set(accs.map { $0.label })
+            // Claude: solo i rinnovi degli account live vdm; gli altri
+            // finiscono tra gli orfani in Altro, senza perdersi.
+            let pren = renewals.filter {
+                $0.provider == p.id && (p.id != "claude" || labels.contains($0.account))
+            }
+            for a in accs {
+                menu.addItem(accountRow(a))
+                for q in a.quotas {
+                    menu.addItem(quotaBarRow(q))
+                }
+                // Bonus cloud sotto il SUO account Claude (è un benefit Max:
+                // sotto codex/muse si triplicherebbe, stessa email). Se Claude
+                // è offline la voce cade nel ripiego Credito AI. nobonus: niente riga.
+                if p.id == "claude", let c = cmap[a.label], c.nobonus != true {
+                    menu.addItem(creditRow(c))
+                    bonusShown.insert(a.label)
+                }
+                // Abbonamento sotto ogni account: la voce di renewals.json
+                // per account+provider (anche tray:false), o il buco in grigio.
+                let mine = pren.filter { $0.account == a.label }
+                if mine.isEmpty {
+                    menu.addItem(unregisteredRow())
+                } else {
+                    for r in mine {
+                        menu.addItem(subscriptionRow(r, providerName: p.name, accountLabels: labels))
+                        shown.insert(r.service + "|" + r.account)
+                    }
+                }
+            }
+            // Email solo-fattura: gruppo proprio con la sua intestazione,
+            // mai sotto l'account di un altro.
+            addGroupedRenewals(pren, providerName: p.name, baseLabels: labels,
+                               menu: menu, shown: &shown)
+        }
+        let orphans = renewals.filter {
+            $0.tray != false && !shown.contains($0.service + "|" + $0.account)
+        }
+        if !orphans.isEmpty {
+            menu.addItem(sectionRow("Altri abbonamenti (fuori rotazione)", providerId: nil))
+            // Stesso raggruppamento per email, senza trattini né righe piatte.
+            addGroupedRenewals(orphans, providerName: "", baseLabels: [],
+                               menu: menu, shown: &shown)
+        }
+        // Ripiego: bonus di account fuori lista (rotazione vdm) o server
+        // vecchio. Solo allora la sezione a parte, che non duplica niente.
+        let spare = cmap.filter { !bonusShown.contains($0.key) && $0.value.nobonus != true }
+        if !spare.isEmpty {
+            menu.addItem(sectionRow("Credito AI", providerId: nil))
+            for email in spare.keys.sorted() {
+                menu.addItem(creditRow(spare[email]!, email: email))
+            }
+        }
+    }
+    menu.addItem(NSMenuItem.separator())
+    let refreshItem = NSMenuItem(title: "Refresh", action: #selector(AppDelegate.refresh), keyEquivalent: "r")
+    refreshItem.target = actionTarget
+    menu.addItem(refreshItem)
+    // Dashboard = vdm (:3335, tool privato): mostrarla solo quando vdm
+    // risponde, altrove sarebbe un link morto.
+    let claudeErr = snapshot?.providers.first(where: { $0.id == "claude" })?.error
+    if !isOffline, claudeErr == nil {
+        let dashItem = NSMenuItem(title: "Open Dashboard", action: #selector(AppDelegate.openDashboard), keyEquivalent: "d")
+        dashItem.target = actionTarget
+        menu.addItem(dashItem)
+    }
+    let quitItem = NSMenuItem(title: "Quit", action: #selector(AppDelegate.quit), keyEquivalent: "q")
+    quitItem.target = actionTarget
+    menu.addItem(quitItem)
+    return menu
+}
+
+// MARK: - Snapshot (--snapshot <file.png>: prova visiva senza barra)
+
+// Disegna il menu in un PNG: le view delle voci una sotto l'altra su fondo
+// finestra. Stesso menu del clic (buildMenu), niente status item, poi esce.
+func snapshotMenu(_ menu: NSMenu, path: String) -> Bool {
+    struct Row { let image: NSImage; let height: CGFloat }
+    var rows: [Row] = []
+    let titledFont = NSFont.systemFont(ofSize: 13)
+    for item in menu.items {
+        if let view = item.view {
+            let w = max(1, view.frame.width), h = max(1, view.frame.height)
+            let bounds = NSRect(x: 0, y: 0, width: w, height: h)
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: bounds) else { continue }
+            view.cacheDisplay(in: bounds, to: rep)
+            let img = NSImage(size: bounds.size)
+            img.addRepresentation(rep)
+            rows.append(Row(image: img, height: h))
+        } else if item.isSeparatorItem {
+            let h: CGFloat = 9
+            let img = NSImage(size: NSSize(width: menuW, height: h))
+            img.lockFocus()
+            NSColor.separatorColor.setFill()
+            NSRect(x: 1, y: h / 2, width: menuW - 2, height: 1).fill()
+            img.unlockFocus()
+            rows.append(Row(image: img, height: h))
+        } else {
+            let h: CGFloat = 22
+            let img = NSImage(size: NSSize(width: menuW, height: h))
+            img.lockFocus()
+            (item.title as NSString).draw(
+                at: NSPoint(x: 16, y: 4),
+                withAttributes: [.font: titledFont, .foregroundColor: NSColor.labelColor])
+            img.unlockFocus()
+            rows.append(Row(image: img, height: h))
+        }
+    }
+    let totalH = max(1, rows.reduce(0) { $0 + $1.height })
+    let totalW = Int(menuW)
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: totalW, pixelsHigh: Int(totalH),
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: totalW * 4, bitsPerPixel: 32)
+    else { return false }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    NSColor.windowBackgroundColor.setFill()
+    NSRect(x: 0, y: 0, width: menuW, height: totalH).fill()
+    var y = totalH
+    for r in rows {
+        y -= r.height
+        r.image.draw(in: NSRect(x: 0, y: y, width: menuW, height: r.height))
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+    do {
+        try png.write(to: URL(fileURLWithPath: path))
+        return true
+    } catch {
+        return false
+    }
+}
+
+func fetchOverviewSync() -> Overview? {
+    guard let url = URL(string: "http://localhost:3337/api/overview") else { return nil }
+    var req = URLRequest(url: url)
+    req.timeoutInterval = 55
+    var out: Overview?
+    let sem = DispatchSemaphore(value: 0)
+    URLSession.shared.dataTask(with: req) { data, _, _ in
+        defer { sem.signal() }
+        guard let data = data else { return }
+        out = try? JSONDecoder().decode(Overview.self, from: data)
+    }.resume()
+    _ = sem.wait(timeout: .now() + 60)
+    return out
+}
+
+func runSnapshotAndExit(path: String) -> Never {
+    _ = NSApplication.shared // font/colori come nella barra, senza runloop
+    guard let snapshot = fetchOverviewSync() else {
+        FileHandle.standardError.write("usage-tray: --snapshot: server :3337 irraggiungibile\n".data(using: .utf8)!)
+        exit(1)
+    }
+    let menu = buildMenu(snapshot: snapshot, isOffline: false, actionTarget: nil)
+    if !snapshotMenu(menu, path: path) {
+        FileHandle.standardError.write("usage-tray: --snapshot: scrittura \(path) fallita\n".data(using: .utf8)!)
+        exit(1)
+    }
+    exit(0)
 }
 
 // MARK: - App
@@ -580,84 +813,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func rebuildMenu() {
-        let menu = NSMenu()
-        menu.autoenablesItems = false
-        menu.addItem(headerRow("Usage"))
-        if isOffline {
-            menu.addItem(infoRow("⚡ Offline — cannot reach usage-server :3337"))
-        } else {
-            menu.addItem(legendRow("Nella barra: 5H sopra, 7D sotto · % e tempo di reset per quota"))
-            menu.addItem(legendRow("Account affievolito: non attivo · ↻: reset o rinnovo"))
-            let providers = snapshot?.providers ?? []
-            let renewals = snapshot?.renewals ?? []
-            var shown = Set<String>()
-            var creditShown = false
-            for p in providers {
-                menu.addItem(sectionRow(p.name, providerId: p.id))
-                let accs = p.accounts ?? []
-                if let err = p.error {
-                    menu.addItem(infoRow("\(p.name): \(err)"))
-                } else if accs.isEmpty {
-                    menu.addItem(infoRow("nessun account"))
-                }
-                let labels = Set(accs.map { $0.label })
-                // Claude: solo i rinnovi degli account live vdm; gli altri
-                // finiscono tra gli orfani in Altro, senza perdersi.
-                let pren = renewals.filter {
-                    $0.provider == p.id && (p.id != "claude" || labels.contains($0.account))
-                }
-                for a in accs {
-                    menu.addItem(accountRow(a))
-                    for q in a.quotas {
-                        menu.addItem(quotaBarRow(q))
-                    }
-                    // Bonus cloud sotto il suo account, come i rinnovi: mai
-                    // sezione a parte (duplicherebbe l'account in lista).
-                    if let c = snapshot?.credit, c.account == a.label {
-                        menu.addItem(creditRow(c))
-                        creditShown = true
-                    }
-                    for r in pren where r.account == a.label {
-                        menu.addItem(renewalRow(r, providerName: p.name, accountLabels: labels))
-                        shown.insert(r.service + "|" + r.account)
-                    }
-                }
-                // Email solo-fattura: gruppo proprio con la sua intestazione,
-                // mai sotto l'account di un altro.
-                addGroupedRenewals(pren, providerName: p.name, baseLabels: labels,
-                                   menu: menu, shown: &shown)
-            }
-            let orphans = renewals.filter { !shown.contains($0.service + "|" + $0.account) }
-            if !orphans.isEmpty {
-                menu.addItem(sectionRow("Altri abbonamenti (fuori rotazione)", providerId: nil))
-                // Stesso raggruppamento per email, senza trattini né righe piatte.
-                addGroupedRenewals(orphans, providerName: "", baseLabels: [],
-                                   menu: menu, shown: &shown)
-            }
-            // Ripiego: l'account del bonus non è in lista (non dovrebbe
-            // capitare: il login è sempre un account vdm). Solo allora la
-            // sezione a parte, che non duplica niente.
-            if let c = snapshot?.credit, !creditShown {
-                menu.addItem(sectionRow("Credito AI", providerId: nil))
-                menu.addItem(creditRow(c))
-            }
-        }
-        menu.addItem(NSMenuItem.separator())
-        let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refresh), keyEquivalent: "r")
-        refreshItem.target = self
-        menu.addItem(refreshItem)
-        // Dashboard = vdm (:3335, tool privato): mostrarla solo quando vdm
-        // risponde, altrove sarebbe un link morto.
-        let claudeErr = snapshot?.providers.first(where: { $0.id == "claude" })?.error
-        if !isOffline, claudeErr == nil {
-            let dashItem = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
-            dashItem.target = self
-            menu.addItem(dashItem)
-        }
-        let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
-        quitItem.target = self
-        menu.addItem(quitItem)
-        statusItem.menu = menu
+        statusItem.menu = buildMenu(snapshot: snapshot, isOffline: isOffline, actionTarget: self)
     }
 
     @objc func refresh() { fetchData() }

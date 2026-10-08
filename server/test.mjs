@@ -1,7 +1,7 @@
 // node --test server/test.mjs — nessun framework, solo node:test.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, code3, mergeCredit } from "./server.mjs";
+import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, code3, mergeCredit, bonusTargets } from "./server.mjs";
 import { parseCloudCredit } from "./probes/cloud-credit.mjs";
 import { EventEmitter } from "node:events";
 import { rpc } from "./probes/codex.mjs";
@@ -212,6 +212,97 @@ describe("parseCloudCredit", () => {
     writeFileSync(p, "1");
     assert.equal(liveQuiet(p), false);
     assert.equal(liveQuiet(p + "-missing"), false);
+  });
+});
+
+describe("creditMap", () => {
+  const live = (account, remaining = 50) => ({ remaining, limit: 100, used: 100 - remaining,
+    renewsAt: "2026-11-06", account });
+  it("live fresco per un login, gli altri account stantii con età intatta", async () => {
+    const { mergeCreditMap } = await import("./probes/cloud-credit.mjs");
+    const before = { "a@example.com": { remaining: 10, limit: 100, used: 90,
+      renewsAt: "2026-11-05", asOf: 1000 } };
+    const { map, credits, changed } =
+      mergeCreditMap(before, live("b@example.com"), 2000);
+    assert.equal(changed, true);
+    assert.equal(credits["b@example.com"].stale, false);
+    assert.equal(credits["b@example.com"].asOf, 2000);
+    assert.equal(credits["a@example.com"].stale, true);
+    assert.equal(credits["a@example.com"].asOf, 1000);
+    assert.equal(map["a@example.com"].remaining, 10);
+  });
+  it("nobonus segna solo quell'account, senza cancellare gli altri", async () => {
+    const { mergeCreditMap } = await import("./probes/cloud-credit.mjs");
+    const before = { "a@example.com": { remaining: 10, limit: 100, used: 90,
+      renewsAt: "2026-11-05", asOf: 1000 } };
+    const { map, credits, changed } =
+      mergeCreditMap(before, { nobonus: true, account: "b@example.com" }, 2000);
+    assert.equal(changed, true);
+    assert.equal(credits["b@example.com"].nobonus, true);
+    assert.equal(credits["b@example.com"].stale, true);
+    assert.equal(map["a@example.com"].remaining, 10);
+    assert.equal(credits["a@example.com"].stale, true);
+  });
+  it("sonda stantia non ringiovanisce né sovrascrive", async () => {
+    const { mergeCreditMap } = await import("./probes/cloud-credit.mjs");
+    const old = { remaining: 10, limit: 100, used: 90,
+      renewsAt: "2026-11-05", asOf: 1000 };
+    const same = mergeCreditMap({ "a@example.com": old },
+      { ...live("a@example.com", 11), stale: true, asOf: 1500 }, 2000);
+    assert.equal(same.changed, false);
+    assert.equal(same.credits["a@example.com"].asOf, 1000);
+    assert.equal(same.credits["a@example.com"].remaining, 10);
+    const fresh = mergeCreditMap({},
+      { ...live("a@example.com"), stale: true, asOf: 1500 }, 2000);
+    assert.equal(fresh.changed, true);
+    assert.equal(fresh.credits["a@example.com"].asOf, 1500);
+    assert.equal(fresh.credits["a@example.com"].stale, true);
+  });
+  it("live senza account e fallimenti non toccano la mappa", async () => {
+    const { mergeCreditMap } = await import("./probes/cloud-credit.mjs");
+    const before = { "a@example.com": { remaining: 10, asOf: 1000 } };
+    for (const probed of [{ ...live(null) }, { ...live("x") },
+        { unavailable: true, account: "b@example.com" }, null]) {
+      const r = mergeCreditMap(before, probed, 2000);
+      assert.equal(r.changed, false);
+      assert.deepEqual(r.map, before);
+      assert.equal(r.credits["a@example.com"].stale, true);
+    }
+  });
+  it("persistenza senza scadenza: si rilegge a qualsiasi età", async () => {
+    const { saveCreditMap, loadCreditMap } = await import("./probes/cloud-credit.mjs");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const p = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tray-cm-")),
+      "sub", "credit-last.json");
+    assert.deepEqual(loadCreditMap(p), {});
+    const map = { "a@example.com": { remaining: 10, limit: 100, used: 90,
+      renewsAt: "2026-11-05", asOf: 1000 },
+      "b@example.com": { nobonus: true, asOf: 1000 } };
+    saveCreditMap(map, p);
+    assert.deepEqual(loadCreditMap(p), map);
+    fs.writeFileSync(p, "rotto{");
+    assert.deepEqual(loadCreditMap(p), {});
+  });
+  it("mergeCredit: nobonus vale come assenza di live", () => {
+    const stale = { remaining: 9, stale: true };
+    const nb = { nobonus: true, account: "a@example.com" };
+    assert.deepEqual(mergeCredit(nb, stale), { credit: stale, save: null });
+    assert.deepEqual(mergeCredit(nb, null), { credit: null, save: null });
+  });
+  it("bonusTargets: solo i profili Max con nome ed email", () => {
+    const vdm = { profiles: [
+      { name: "auto-2", label: "a@example.com", subscriptionType: "max" },
+      { name: "auto-3", label: "b@example.com", subscriptionType: "max" },
+      { name: "auto-9", label: "c@example.com", subscriptionType: "pro" },
+      { name: null, label: "d@example.com", subscriptionType: "max" },
+    ] };
+    assert.deepEqual(bonusTargets(vdm), [
+      { name: "auto-2", email: "a@example.com" },
+      { name: "auto-3", email: "b@example.com" },
+    ]);
+    assert.deepEqual(bonusTargets(null), []);
   });
 });
 
