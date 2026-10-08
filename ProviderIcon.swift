@@ -14,6 +14,9 @@ private let fallbackForProvider: [String: (String, NSColor)] = [
     "claude": ("A", NSColor(red: 0xD9 / 255, green: 0x77 / 255, blue: 0x57 / 255, alpha: 1)),
     "codex": ("O", .black),
     "muse": ("M", NSColor(red: 0x00 / 255, green: 0x82 / 255, blue: 0xFB / 255, alpha: 1)),
+    "openrouter": ("O", .black),
+    "resend": ("R", .black),
+    "elevenlabs": ("E", .black),
 ]
 
 func assetsDir() -> URL {

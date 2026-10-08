@@ -35,6 +35,8 @@ struct Provider: Codable {
     let name: String
     let error: String?
     let accounts: [Account]?
+    let menuOnly: Bool?
+    let billing: String?
 }
 
 struct Account: Codable {
@@ -52,6 +54,7 @@ struct Quota: Codable {
     let resetsAt: Int?
     let resetText: String
     let status: String
+    let detail: String?
 }
 
 struct Renewal: Codable {
@@ -128,6 +131,7 @@ class UsageBarView: NSView {
     private func flat() -> [(Provider, Account)] {
         var out: [(Provider, Account)] = []
         for p in snapshot?.providers ?? [] {
+            if p.menuOnly == true { continue }
             for a in p.accounts ?? [] { out.append((p, a)) }
         }
         return out
@@ -171,6 +175,7 @@ class UsageBarView: NSView {
         var groups: [GroupFrame] = []
         var x = padX
         for p in snapshot?.providers ?? [] {
+            if p.menuOnly == true { continue }
             let accs = p.accounts ?? []
             if accs.isEmpty { continue }
             let gx = x
@@ -375,6 +380,27 @@ func quotaBarRow(_ q: Quota) -> NSMenuItem {
     time.textColor = .secondaryLabelColor
     time.frame = NSRect(x: 286, y: 4, width: menuW - 302, height: 16)
     view.addSubview(time)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+// Riga hub (a consumo): tag + numeri assoluti, niente barra. Il numero
+// ("$1.05 su $50") è il dato; la % vive nel tooltip.
+func hubQuotaRow(_ q: Quota) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
+    let key = NSTextField(labelWithString: q.key.uppercased())
+    key.font = .systemFont(ofSize: 11, weight: .semibold)
+    key.textColor = .labelColor
+    key.frame = NSRect(x: 38, y: 3, width: 34, height: 16)
+    view.addSubview(key)
+    var right = q.detail ?? "\(q.usedPct)%"
+    if !q.resetText.isEmpty { right += " · ↻ \(q.resetText)" }
+    let val = NSTextField(labelWithString: right)
+    val.font = .systemFont(ofSize: 10.5)
+    val.textColor = q.status == "ok" ? .labelColor : statusColor(q.status)
+    val.frame = NSRect(x: 76, y: 3, width: menuW - 92, height: 16)
+    view.addSubview(val)
     let item = NSMenuItem()
     item.view = view
     return item
@@ -598,7 +624,7 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
             for a in accs {
                 menu.addItem(accountRow(a))
                 for q in a.quotas {
-                    menu.addItem(quotaBarRow(q))
+                    menu.addItem(p.billing == "usage" ? hubQuotaRow(q) : quotaBarRow(q))
                 }
                 // Bonus cloud sotto il SUO account Claude (è un benefit Max:
                 // sotto codex/muse si triplicherebbe, stessa email). Se Claude
@@ -609,13 +635,16 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
                 }
                 // Abbonamento sotto ogni account: la voce di renewals.json
                 // per account+provider (anche tray:false), o il buco in grigio.
-                let mine = pren.filter { $0.account == a.label }
-                if mine.isEmpty {
-                    menu.addItem(unregisteredRow())
-                } else {
-                    for r in mine {
-                        menu.addItem(subscriptionRow(r, providerName: p.name, accountLabels: labels))
-                        shown.insert(r.service + "|" + r.account)
+                // A consumo non c'è abbonamento: niente riga e niente buco grigio.
+                if p.billing != "usage" {
+                    let mine = pren.filter { $0.account == a.label }
+                    if mine.isEmpty {
+                        menu.addItem(unregisteredRow())
+                    } else {
+                        for r in mine {
+                            menu.addItem(subscriptionRow(r, providerName: p.name, accountLabels: labels))
+                            shown.insert(r.service + "|" + r.account)
+                        }
                     }
                 }
             }
@@ -805,7 +834,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.toolTip = "usage-server offline (:3337)"
         } else {
             let parts = (snapshot?.providers ?? []).flatMap { $0.accounts ?? [] }
-                .map { "\($0.label) (\($0.code)): \($0.quotas.map { "\($0.key.uppercased()) \($0.usedPct)% ↻\($0.resetText)" }.joined(separator: " "))" }
+                .map { "\($0.label) (\($0.code)): \($0.quotas.map { "\($0.key.uppercased()) \($0.usedPct)% ↻\($0.resetText)\($0.detail.map { " " + $0 } ?? "")" }.joined(separator: " "))" }
             statusItem.button?.toolTip = parts.joined(separator: "\n")
         }
         barView.needsDisplay = true

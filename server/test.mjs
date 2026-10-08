@@ -1,7 +1,7 @@
 // node --test server/test.mjs — nessun framework, solo node:test.
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, code3, mergeCredit, bonusTargets } from "./server.mjs";
+import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, code3, mergeCredit, bonusTargets, mapHub, shortNum } from "./server.mjs";
 import { parseCloudCredit } from "./probes/cloud-credit.mjs";
 import { EventEmitter } from "node:events";
 import { rpc } from "./probes/codex.mjs";
@@ -303,6 +303,87 @@ describe("creditMap", () => {
       { name: "auto-3", email: "b@example.com" },
     ]);
     assert.deepEqual(bonusTargets(null), []);
+  });
+});
+
+describe("hub", () => {
+  it("shortNum: k sopra mille, due decimali sotto cento", () => {
+    assert.equal(shortNum(45300), "45k");
+    assert.equal(shortNum(1200), "1.2k");
+    assert.equal(shortNum(1000), "1k");
+    assert.equal(shortNum(999), "999");
+    assert.equal(shortNum(49), "49");
+    assert.equal(shortNum(1.05), "1.05");
+    assert.equal(shortNum(0.5), "0.5");
+  });
+  it("parseOpenRouter: spesa del mese sul tetto, label o default", async () => {
+    const { parseOpenRouter } = await import("./probes/hub.mjs");
+    const live = { data: { label: "Test", usage: 1.5, usage_monthly: 0.5,
+      limit: 50, limit_reset: "monthly" } };
+    assert.deepEqual(parseOpenRouter(live), { label: "Test", quotas: [
+      { key: "usd", used: 0.5, limit: 50, unit: "$", reset: null, resetWord: "mensile" }] });
+    const nocap = { data: { label: "", usage: 2, limit: null } };
+    assert.deepEqual(parseOpenRouter(nocap).quotas[0].limit, null);
+    assert.equal(parseOpenRouter(nocap).label, "OpenRouter");
+    assert.equal(parseOpenRouter({}), null);
+    assert.equal(parseOpenRouter({ data: { usage: "x" } }), null);
+  });
+  it("parseResendUsage: mensile sempre, giornaliera solo con tetto", async () => {
+    const { parseResendUsage } = await import("./probes/hub.mjs");
+    const doc = { object: "usage",
+      emails: { daily: { used: 25, limit: 100, resets_at: "2026-10-09T00:00:00.000Z" },
+                monthly: { used: 1200, limit: 3000, resets_at: "2026-11-01T00:00:00.000Z" } } };
+    const both = parseResendUsage(doc, "acme");
+    assert.equal(both.label, "acme");
+    assert.deepEqual(both.quotas.map((q) => q.key), ["30g", "24h"]);
+    const nocap = structuredClone(doc);
+    nocap.emails.daily.limit = null;
+    assert.deepEqual(parseResendUsage(nocap, "acme").quotas.map((q) => q.key), ["30g"]);
+    assert.equal(parseResendUsage({ object: "usage" }, "acme"), null);
+  });
+  it("parseEleven: email o tier come label, unix come reset", async () => {
+    const { parseEleven } = await import("./probes/hub.mjs");
+    const sub = { character_count: 4500, character_limit: 10000,
+      next_character_count_reset_unix: 1794074400, tier: "starter" };
+    assert.deepEqual(parseEleven(sub, { email: "a@example.com" }), {
+      label: "a@example.com", quotas: [
+        { key: "chr", used: 4500, limit: 10000, unit: "", reset: 1794074400, resetWord: null }] });
+    assert.equal(parseEleven(sub, null).label, "starter");
+    assert.equal(parseEleven({}, null), null);
+  });
+  it("classify: sendonly, noperm, timeout, http", async () => {
+    const { classifyResendError, classifyElevenError } = await import("./probes/hub.mjs");
+    assert.equal(classifyResendError(401, { name: "restricted_api_key" }), "sendonly");
+    assert.equal(classifyResendError(401, {}), "rejected");
+    assert.equal(classifyResendError(0, null), "timeout");
+    assert.equal(classifyElevenError(401, { Detail: { status: "missing_permissions" } }), "noperm");
+    assert.equal(classifyElevenError(401, { Detail: { message: "missing the permission user_read" } }), "noperm");
+    const zwsp = JSON.parse('{"detail\\u200b":{"status":"missing_permissions"}}');
+    assert.equal(zwsp.Detail, undefined);
+    assert.equal(classifyElevenError(401, zwsp), "noperm");
+    const rzwsp = JSON.parse('{"name\\u200b":"restricted_api_key"}');
+    assert.equal(classifyResendError(401, rzwsp), "sendonly");
+    assert.equal(classifyElevenError(500, null), "http500");
+  });
+  it("mapHub: detail coi numeri, flag hub, errori in chiaro", () => {
+    const live = { label: "Test", quotas: [
+      { key: "usd", used: 0.5, limit: 50, unit: "$", reset: null, resetWord: "mensile" }] };
+    const m = mapHub("openrouter", "OpenRouter", live);
+    assert.equal(m.menuOnly, true);
+    assert.equal(m.billing, "usage");
+    assert.equal(m.accounts[0].label, "Test");
+    const q = m.accounts[0].quotas[0];
+    assert.equal(q.usedPct, 1);
+    assert.equal(q.detail, "$0.5 su $50");
+    assert.equal(q.resetText, "mensile");
+    const nolimit = { label: "T", quotas: [
+      { key: "usd", used: 2, limit: null, unit: "$", reset: null, resetWord: null }] };
+    assert.equal(mapHub("o", "O", nolimit).accounts[0].quotas[0].detail, "$2 spesi");
+    assert.equal(mapHub("r", "R", { error: "sendonly" }).error,
+      "serve chiave full-access (questa invia e basta)");
+    assert.equal(mapHub("e", "E", { error: "noperm" }).error,
+      "chiave senza permesso user_read");
+    assert.equal(mapHub("x", "X", null).error, "no data");
   });
 });
 

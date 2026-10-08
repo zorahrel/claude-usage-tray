@@ -9,6 +9,7 @@ import path from "node:path";
 import { probeCodex } from "./probes/codex.mjs";
 import { probeCloudCredits, creditAccount, saveLastGood, loadLastGood,
          loadCreditMap, saveCreditMap, mergeCreditMap } from "./probes/cloud-credit.mjs";
+import { probeOpenRouter, probeResend, probeEleven } from "./probes/hub.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3337;
@@ -148,6 +149,52 @@ export function mergeCredit(probe, last) {
   return { credit: null, save: null };
 }
 
+// Numeri corti per le righe hub: 45300 → "45k", 1200 → "1.2k", 1.05 → "1.05".
+export function shortNum(n) {
+  if (n >= 10000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1000) {
+    const k = Math.round(n / 100) / 10;
+    return `${Number.isInteger(k) ? k : k.toFixed(1)}k`;
+  }
+  if (n >= 100) return `${Math.round(n)}`;
+  return `${Math.round(n * 100) / 100}`;
+}
+
+const HUB_ERRORS = {
+  nokey: "chiave assente nel keychain",
+  sendonly: "serve chiave full-access (questa invia e basta)",
+  noperm: "chiave senza permesso user_read",
+  rejected: "chiave rifiutata",
+  timeout: "timeout",
+};
+
+// Provider hub (solo menu, a consumo): quote con numeri assoluti nel
+// detail ("$1.05 su $50"). Senza dati: la riga dice cosa manca.
+export function mapHub(id, name, out) {
+  const base = { id, name, menuOnly: true, billing: "usage" };
+  if (!out || out.error || !Array.isArray(out.quotas) || out.quotas.length === 0) {
+    const err = out?.error;
+    const text = HUB_ERRORS[err] ?? (typeof err === "string" && err.startsWith("http")
+      ? `HTTP ${err.slice(4)}` : "no data");
+    return { ...base, error: text };
+  }
+  const withUnit = (v, u) => (u === "$" ? `$${v}` : `${v}${u}`);
+  const quotas = out.quotas.map((q) => {
+    const usedPct = q.limit > 0 ? Math.round((q.used / q.limit) * 100) : 0;
+    const resetsAt = typeof q.reset === "number" ? q.reset : toEpoch(q.reset);
+    const detail = q.limit > 0
+      ? `${withUnit(shortNum(q.used), q.unit)} su ${withUnit(shortNum(q.limit), q.unit)}`
+      : `${withUnit(shortNum(q.used), q.unit)} spesi`;
+    return { key: q.key, usedPct, resetsAt,
+             resetText: q.resetWord ?? resetText(resetsAt),
+             status: statusFor(usedPct, null), detail };
+  });
+  const label = typeof out.label === "string" && out.label ? out.label : name;
+  const worst = Math.max(...quotas.map((q) => q.usedPct));
+  return { ...base, accounts: [{ id, label, code: code3(label), active: true,
+    status: statusFor(worst, null), quotas }] };
+}
+
 // Profili vdm con Max: il bonus cloud spetta a ognuno, la sonda li gira
 // tutti via CLOUD_ACCOUNT. Senza vdm: un giro sul login corrente.
 export function bonusTargets(vdm) {
@@ -167,10 +214,13 @@ async function overview() {
   // vdm prima (locale, millisecondi): i nomi dei profili servono alla
   // sonda multipla. Il resto in parallelo: in sequenza supera i 55s della tray.
   const vdm = await fetchVdm().catch(() => null);
-  const [cx, museOut, probed] = await Promise.all([
+  const [cx, museOut, probed, orOut, reOut, elOut] = await Promise.all([
     probeCodex(),
     runProbe("muse_probe.py"),
     probeCloudCredits(vdm ? bonusTargets(vdm) : []),
+    probeOpenRouter(),
+    probeResend(),
+    probeEleven(),
   ]);
   const providers = [];
   providers.push(vdm
@@ -178,6 +228,9 @@ async function overview() {
     : { id: "claude", name: "Claude", error: "vdm offline" });
   providers.push(mapQuotas(cx, "codex", "Codex", "codex", "Codex", cx?.email));
   providers.push(mapMuse(museOut));
+  providers.push(mapHub("openrouter", "OpenRouter", orOut));
+  providers.push(mapHub("resend", "Resend", reOut));
+  providers.push(mapHub("elevenlabs", "ElevenLabs", elOut));
   const login = creditAccount();
   const merged = mergeCredit(probed.find((p) => p.account === login) ?? null, loadLastGood());
   if (merged.save) saveLastGood(merged.save);

@@ -18,6 +18,9 @@ Brand glyphs, 8px each, drawn from normalized assets:
     without it the tray shows "vdm offline" and the rest works),
   - **codex** via `codex app-server` JSON-RPC (needs the `codex` CLI),
   - **muse** via `server/muse_probe.py` (needs `python3`, Keychain token),
+  - **hub credits** (menu only, never in the bar): **openrouter**,
+    **resend**, **elevenlabs** — live usage vs plan limit from each
+    vendor API, keys from your macOS Keychain (see below),
   - **cloud credit** from `~/bin/credito-cloud --json` when present
     (my own tool, optional — the menu section hides without it),
   - manual renewals from `server/renewals.json`.
@@ -30,6 +33,26 @@ Any executable at `~/bin/credito-cloud` answering `--json` with
 `{"iguana_necktie": {"remaining_dollars": N, "limit_dollars": M,
 "used_dollars": K, "resets_at": "ISO"}}` feeds the "Credito AI" menu
 section. Missing or failing → the section hides, nothing breaks.
+
+## Hub credits (menu only)
+
+OpenRouter, Resend and ElevenLabs live in the dropdown with real
+numbers and reset times — usage vs plan limit, no estimates. Without
+a working key the row says what's missing instead of guessing.
+
+| Provider | Endpoint | Keychain service | Key scope |
+|---|---|---|---|
+| OpenRouter | `GET /api/v1/auth/key` | `openrouter` | any key (per-key `$` cap) |
+| Resend | `GET /usage` | `resend-<account>` | full access (sending-only keys get 401) |
+| ElevenLabs | `GET /user/subscription` | `elevenlabs` | needs `user_read` permission |
+
+```sh
+security add-generic-password -s openrouter -w "<key>" -U
+```
+
+Account labels come from each API (key name, tier, email); Resend uses
+the `resend-<account>` suffix. OpenAI/Anthropic API balances have no
+key-based endpoint and are deliberately not shown.
 
 ## Install
 
@@ -58,7 +81,7 @@ empty instead of failing.
 
 ```sh
 node --test assets/bar-icons.test.mjs   # 72px assets, transparency, 8px hole
-node --test server/test.mjs             # mapping + parsing + codex rpc
+node --test server/test.mjs             # mapping + parsing + codex rpc + hub
 python3 -m unittest server.test_muse_probe -v   # muse cache/fail-quiet logic
 ```
 
