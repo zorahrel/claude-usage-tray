@@ -2,3 +2,4 @@ ClaudeUsage
 ClaudeUsage.bak*
 *.o
 .build/
+server/renewals.json

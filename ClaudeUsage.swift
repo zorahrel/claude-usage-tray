@@ -1,632 +1,619 @@
 import Cocoa
+import CoreText
 
-// MARK: - Models
+// MARK: - Models (specchia GET :3337/api/overview)
 
-struct APIResponse: Codable {
-    let profiles: [Profile]
-    let allExhausted: Bool
-    let earliestReset: String?
-    let rotationStrategy: String?
-    let passthrough: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case profiles, allExhausted, earliestReset, rotationStrategy, passthrough
-    }
-
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        profiles = try c.decode([Profile].self, forKey: .profiles)
-        allExhausted = try c.decodeIfPresent(Bool.self, forKey: .allExhausted) ?? false
-        rotationStrategy = try c.decodeIfPresent(String.self, forKey: .rotationStrategy)
-        passthrough = try c.decodeIfPresent(Bool.self, forKey: .passthrough) ?? false
-        // earliestReset can be string, int, or null
-        if let s = try? c.decode(String.self, forKey: .earliestReset) {
-            earliestReset = s
-        } else if let i = try? c.decode(Int.self, forKey: .earliestReset) {
-            let date = Date(timeIntervalSince1970: Double(i))
-            let fmt = DateFormatter()
-            fmt.dateFormat = "HH:mm"
-            fmt.timeZone = TimeZone.current
-            earliestReset = fmt.string(from: date)
-        } else {
-            earliestReset = nil
-        }
-    }
+struct Overview: Codable {
+    let providers: [Provider]
+    let renewals: [Renewal]
+    let credit: CloudCredit?
 }
 
-struct Profile: Codable {
+struct CloudCredit: Codable {
+    let remaining: Double
+    let limit: Double?
+    let renewsAt: String?
+}
+
+struct Provider: Codable {
+    let id: String
     let name: String
-    let label: String?
-    let isActive: Bool?
-    let dormant: Bool?
-    let rateLimits: RateLimits?
-    let disabled: Bool?
-    let limited: Bool?
-    let retryAfter: Int?
-    let blockKind: String?
-    let myTokens5h: Int?
-    let myTokens7d: Int?
+    let error: String?
+    let accounts: [Account]?
+}
 
-    var displayName: String {
-        label ?? name
-    }
-    var isDisabled: Bool { disabled == true }
+struct Account: Codable {
+    let id: String
+    let label: String
+    let code: String
+    let active: Bool
+    let status: String
+    let quotas: [Quota]
+}
 
-    // True wall: real rate-limit cooldown with a future retryAfter, independent
-    // of unified utilization (e.g. weekly Opus cap hit while 5h/7d bars look free).
-    var isBlocked: Bool {
-        guard limited == true, let ra = retryAfter, ra > 0 else { return false }
-        let nowMs = Int(Date().timeIntervalSince1970 * 1000)
-        return ra > nowMs
-    }
+struct Quota: Codable {
+    let key: String
+    let usedPct: Int
+    let resetsAt: Int?
+    let resetText: String
+    let status: String
+}
 
-    // blockKind is the authoritative reason, unlike isLimited/fiveH.status which
-    // bounce on transient probe failures and used to cause false full-red states.
-    var isQuotaBlocked: Bool { blockKind == "quota-5h" || blockKind == "quota-7d" }
-    var isModelBlocked: Bool { blockKind == "model" }
-    var isAuthBlocked: Bool { blockKind == "auth" }
-    var blockedText: String {
-        guard let ra = retryAfter, ra > 0 else { return "" }
-        return Self.formatReset(ra / 1000)
-    }
-    var retryAfterDateText: String {
-        guard let ra = retryAfter, ra > 0 else { return "" }
-        let date = Date(timeIntervalSince1970: Double(ra) / 1000)
-        let fmt = DateFormatter()
-        fmt.dateFormat = "dd/MM HH:mm"
-        fmt.timeZone = TimeZone.current
-        return fmt.string(from: date)
-    }
-    static func formatTokens(_ n: Int) -> String {
-        if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1_000_000) }
-        if n >= 1_000 { return String(format: "%.1fk", Double(n) / 1_000) }
-        return "\(n)"
-    }
-    var u5h: Double { rateLimits?.fiveH?.utilization ?? 0 }
-    var u7d: Double { rateLimits?.sevenD?.utilization ?? 0 }
-    var reset5h: Int? { rateLimits?.fiveH?.reset }
-    
-    var reset7d: Int? { rateLimits?.sevenD?.reset }
-    
-    var hoursToReset5h: String {
-        guard let r = reset5h else { return "" }
-        return Self.formatReset(r)
-    }
-    var hoursToReset7d: String {
-        guard let r = reset7d else { return "" }
-        return Self.formatReset(r)
-    }
-    var hoursToReset: String { hoursToReset5h }
-    
-    static func formatReset(_ epoch: Int) -> String {
-        let secs = epoch - Int(Date().timeIntervalSince1970)
-        if secs <= 0 { return "now" }
-        let d = secs / 86400
-        let h = (secs % 86400) / 3600
-        let m = (secs % 3600) / 60
-        if d > 0 { return "\(d)d\(h)h" }
-        if h > 0 { return "\(h)h\(m)m" }
-        return "\(m)m"
-    }
-    var isLimited: Bool {
-        rateLimits?.status == "limited" || rateLimits?.fiveH?.status == "limited"
+struct Renewal: Codable {
+    let service: String
+    let account: String
+    let amount: String
+    let cycle: String
+    let renewsAt: String?
+    let note: String
+    let provider: String?
+}
+
+func statusColor(_ s: String) -> NSColor {
+    switch s {
+    case "ok": return NSColor(red: 0x30 / 255, green: 0xD1 / 255, blue: 0x58 / 255, alpha: 1)
+    case "warning": return .systemOrange
+    case "critical", "depleted": return .systemRed
+    default: return .secondaryLabelColor
     }
 }
 
-struct RateLimits: Codable {
-    let status: String?
-    let fiveH: Window?
-    let sevenD: Window?
+// Testo con baseline ESATTA: NSString.draw(at:) sposta tutto di ~+2.4pt
+// rispetto alla y data (misurato sull'inchiostro il 2026-10-07), rendendo
+// inutile qualsiasi centratura calcolata. CoreText no: textPosition = baseline.
+func drawBaseline(_ s: String, x: CGFloat, baseline y: CGFloat,
+                  font: NSFont, color: NSColor, shadow: Bool = false) {
+    guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+    let line = CTLineCreateWithAttributedString(
+        NSAttributedString(string: s, attributes: [.font: font,
+                                                   .foregroundColor: color]))
+    ctx.saveGState()
+    if shadow {
+        ctx.setShadow(offset: CGSize(width: 0, height: -0.5), blur: 1,
+                      color: NSColor.black.withAlphaComponent(0.75).cgColor)
+    }
+    ctx.textPosition = CGPoint(x: x, y: y)
+    CTLineDraw(line, ctx)
+    ctx.restoreGState()
 }
 
-struct Window: Codable {
-    let status: String?
-    let reset: Int?
-    let utilization: Double?
-}
-
-// MARK: - Tray Bar Drawing
+// MARK: - Menubar view: una colonna per account, quote impilate
+//
+// Header con mini-logo del provider + email, sotto le quote in colonna
+// (5h sopra, 7d sotto): tag finestra, barra (= quota usata), %, reset.
+// Tutti i testi bianchi, sempre: i grigi su questa barra non si leggono.
 
 class UsageBarView: NSView {
-    var profiles: [Profile] = []
+    var snapshot: Overview?
     var isOffline = false
-    var allExhausted = false
-    var earliestReset: String?
-    var passthrough = false
 
-    static let barHeight: CGFloat = 3
-    static let barGap: CGFloat = 2
-    static let groupGap: CGFloat = 4
-    static let padding: CGFloat = 3
-    static let passthroughBadge = "⚡"
+    // Tre righe intere: mail 7pt + 5H + 7D. Icona 8px a x0 come le righe
+    // (15..23, cima flush col top caps), mail rientrata dopo l'icona.
+    // Tag maiuscoli 7pt (top 13.5): i gambetti di h/d toccherebbero l'icona.
+    private let headerFont = NSFont.systemFont(ofSize: 7, weight: .semibold)
+    private let headerBaseline: CGFloat = 17
+    private let iconSize: CGFloat = 8
+    private let iconY: CGFloat = 15
+    private let iconIndent: CGFloat = 11
+    private let tagFont = NSFont.monospacedSystemFont(ofSize: 7, weight: .semibold)
+    private let tagBaselineShift: CGFloat = -0.5   // top 13.5, aria dall'icona
+    private let pctFont = NSFont.monospacedSystemFont(ofSize: 9, weight: .bold)
+    private let timeFont = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
+    private let rowTopBaseline: CGFloat = 9    // prima quota (5h)
+    private let rowBotBaseline: CGFloat = 1    // seconda quota (7d)
+    private let barW: CGFloat = 20      // minimo utile: il numero dà la precisione
+    private let barH: CGFloat = 6
+    private let pctW: CGFloat = 22      // "100%" fissa: al cambio cifra niente salta
+    private let gap: CGFloat = 2
+    private let timeGap: CGFloat = 3
+    private let acctGap: CGFloat = 6    // uguale ovunque: niente separatori
+    private let padX: CGFloat = 4
 
-    func passthroughBadgeWidth() -> CGFloat {
-        guard passthrough else { return 0 }
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9, weight: .bold)]
-        return (UsageBarView.passthroughBadge as NSString).size(withAttributes: attrs).width + UsageBarView.groupGap
+    private func flat() -> [(Provider, Account)] {
+        var out: [(Provider, Account)] = []
+        for p in snapshot?.providers ?? [] {
+            for a in p.accounts ?? [] { out.append((p, a)) }
+        }
+        return out
     }
 
-    func barWidth(for p: Profile) -> CGFloat {
-        let label = String(p.displayName.prefix(5)).uppercased()
-        let nameAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 7, weight: .bold)]
-        let resetAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedDigitSystemFont(ofSize: 7, weight: .regular)]
-        let nameW = (label as NSString).size(withAttributes: nameAttrs).width
-        let resetText = p.isBlocked ? p.blockedText : "00h00m"
-        let resetW = (resetText as NSString).size(withAttributes: resetAttrs).width
-        return nameW + 4 + resetW  // 4px gap so the name and countdown never touch
+    private func quotaWidth(_ q: Quota) -> CGFloat {
+        let tagW = (q.key.uppercased() as NSString).size(withAttributes: [.font: tagFont]).width
+        let timeW = (q.resetText as NSString).size(withAttributes: [.font: timeFont]).width
+        return tagW + gap + barW + gap + pctW + timeGap + timeW
+    }
+
+    // Email maiuscola, croppata con … oltre cap. Stessa stringa in
+    // layout e disegno: si calcola qui una volta sola per cella.
+    private func cropEmail(_ s: String, cap: CGFloat) -> String {
+        let up = s.uppercased()
+        let attrs: [NSAttributedString.Key: Any] = [.font: headerFont]
+        if (up as NSString).size(withAttributes: attrs).width <= cap { return up }
+        var t = up
+        while t.count > 6,
+              (t + "…" as NSString).size(withAttributes: attrs).width > cap {
+            t.removeLast()
+        }
+        return t + "…"
+    }
+
+    // Un solo passaggio di layout per misura e disegno: niente derive tra i due.
+    private struct AcctFrame {
+        let acct: Account
+        let header: String
+        let x: CGFloat
+        let w: CGFloat
+    }
+    private struct GroupFrame {
+        let prov: Provider
+        let x: CGFloat
+        let w: CGFloat
+        let accts: [AcctFrame]
+    }
+
+    private func layout() -> (groups: [GroupFrame], width: CGFloat) {
+        var groups: [GroupFrame] = []
+        var x = padX
+        for p in snapshot?.providers ?? [] {
+            let accs = p.accounts ?? []
+            if accs.isEmpty { continue }
+            let gx = x
+            var frames: [AcctFrame] = []
+            for a in accs {
+                // larghezza = riga quota più larga; la mail si taglia a misura,
+                // mai oltre. Le righe non si tagliano mai.
+                let qw = a.quotas.prefix(2).map { quotaWidth($0) }.max() ?? 0
+                let header = cropEmail(a.label, cap: max(30, qw - iconIndent))
+                let hw = iconIndent
+                    + (header as NSString).size(withAttributes: [.font: headerFont]).width
+                let cw = max(hw, qw)
+                frames.append(AcctFrame(acct: a, header: header, x: x, w: cw))
+                x += cw + acctGap
+            }
+            x -= acctGap
+            groups.append(GroupFrame(prov: p, x: gx, w: x - gx, accts: frames))
+            x += acctGap
+        }
+        if !groups.isEmpty { x -= acctGap }
+        return (groups, x + padX)
     }
 
     func idealWidth() -> CGFloat {
-        if profiles.isEmpty { return UsageBarView.padding * 2 + 30 }
-        var w = UsageBarView.padding * 2 + passthroughBadgeWidth()
-        for (i, p) in profiles.enumerated() {
-            w += barWidth(for: p)
-            if i < profiles.count - 1 { w += UsageBarView.groupGap }
-        }
-        return w
+        if isOffline || flat().isEmpty { return 26 }
+        return layout().width
     }
-    
+
     override func draw(_ dirtyRect: NSRect) {
-        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-        
-        let pad = UsageBarView.padding
-        let gg = UsageBarView.groupGap
-        
-        // Menu bar is 22px. Layout:
-        // Top half (y 11-19): account name (left) + reset time (right)
-        // Bottom half (y 2-9): two bars side by side [5h][7d]
-        
-        let textY: CGFloat = 11
-        let barY: CGFloat = 3
-        let barH: CGFloat = 5
-        
-        if isOffline || profiles.isEmpty {
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 7, weight: .medium),
-                .foregroundColor: NSColor.tertiaryLabelColor
-            ]
-            ("--" as NSString).draw(at: NSPoint(x: pad, y: 6), withAttributes: attrs)
+        NSColor.clear.setFill()
+        dirtyRect.fill()
+        if isOffline || flat().isEmpty {
+            let s = "···" as NSString
+            s.draw(at: NSPoint(x: 6, y: 4), withAttributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.white,
+            ])
             return
         }
-        
-        var x = pad
-
-        if passthrough {
-            let badgeAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9, weight: .bold),
-                .foregroundColor: NSColor.systemYellow
-            ]
-            (UsageBarView.passthroughBadge as NSString).draw(at: NSPoint(x: x, y: 6), withAttributes: badgeAttrs)
-            x += passthroughBadgeWidth()
-        }
-
-        for (i, p) in profiles.enumerated() {
-            let bw = barWidth(for: p)
-            let blocked = p.isBlocked
-            let quotaBlocked = p.isQuotaBlocked
-            let modelBlocked = p.isModelBlocked
-            let disabled = p.isDisabled
-
-            // Top row: name left, reset (or blocked countdown) right
-            let shortName = String(p.displayName.prefix(5)).uppercased()
-            let dimColor = disabled ? NSColor.white.withAlphaComponent(0.25)
-                : quotaBlocked ? NSColor.systemRed
-                : modelBlocked ? NSColor.systemOrange
-                : p.isActive == true ? NSColor.white : NSColor.white.withAlphaComponent(0.5)
-            let nameAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.monospacedSystemFont(ofSize: 7, weight: p.isActive == true ? .bold : .regular),
-                .foregroundColor: dimColor
-            ]
-            (shortName as NSString).draw(at: NSPoint(x: x, y: textY), withAttributes: nameAttrs)
-
-            let resetStr = blocked ? p.blockedText : p.hoursToReset
-            if !resetStr.isEmpty {
-                let resetAttrs: [NSAttributedString.Key: Any] = [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 7, weight: .regular),
-                    .foregroundColor: dimColor
-                ]
-                let resetSize = (resetStr as NSString).size(withAttributes: resetAttrs)
-                (resetStr as NSString).draw(at: NSPoint(x: x + bw - resetSize.width, y: textY), withAttributes: resetAttrs)
+        let (groups, _) = layout()
+        for g in groups {
+            for f in g.accts {
+                let a = f.acct
+                // non attivo: barre dimezzate, testi quasi pieni (devono leggersi)
+                let barDim: CGFloat = a.active ? 1 : 0.45
+                let txtDim: CGFloat = a.active ? 1 : 0.8
+                let white = NSColor.white.withAlphaComponent(txtDim)
+                // -1px: l'inchiostro parte dentro il rettangolo, così il bordo
+                // vivo dell'icona cade sulla stessa x delle righe (misurato).
+                barIcon(g.prov.id, sizePt: iconSize)
+                    .draw(in: NSRect(x: f.x - 1, y: iconY, width: iconSize, height: iconSize))
+                drawBaseline(f.header, x: f.x + iconIndent, baseline: headerBaseline,
+                             font: headerFont, color: white, shadow: true)
+                // due righe quota: 5H sopra, 7D sotto (o una sola se unica).
+                // Partono a x0 come l'icona: niente gutter dedicato.
+                let rows = a.quotas.prefix(2)
+                for (ri, q) in rows.enumerated() {
+                    let base = ri == 0 ? rowTopBaseline : rowBotBaseline
+                    var cx = f.x
+                    let tag = q.key.uppercased()
+                    let tagW = (tag as NSString).size(withAttributes: [.font: tagFont]).width
+                    drawBaseline(tag, x: cx, baseline: base + tagBaselineShift,
+                                 font: tagFont, color: white, shadow: true)
+                    cx += tagW + gap
+                    // base+0: la barra centra il corpo dei numeri (base..+6.5),
+                    // non galleggia sopra (base+1 la alzava di 1px).
+                    let barRect = NSRect(x: cx, y: base, width: barW, height: barH)
+                    NSColor.white.withAlphaComponent(0.22 * barDim).setFill()
+                    NSBezierPath(roundedRect: barRect, xRadius: 2.5, yRadius: 2.5).fill()
+                    let fw = barW * min(100, max(0, q.usedPct)).double / 100
+                    if fw > 0.5 {
+                        NSGraphicsContext.saveGraphicsState()
+                        NSBezierPath(roundedRect: barRect, xRadius: 2.5, yRadius: 2.5).setClip()
+                        statusColor(q.status).withAlphaComponent(barDim).setFill()
+                        NSRect(x: barRect.minX, y: barRect.minY, width: fw, height: barH).fill()
+                        NSGraphicsContext.restoreGraphicsState()
+                    }
+                    cx += barW + gap
+                    // % nel colore di stato quando c'è un problema: l'occhio ci va da solo
+                    let pctColor: NSColor = q.status == "ok"
+                        ? white : statusColor(q.status).withAlphaComponent(txtDim)
+                    let pct = "\(q.usedPct)%"
+                    let pw = (pct as NSString).size(withAttributes: [.font: pctFont]).width
+                    drawBaseline(pct, x: cx + (pctW - pw) / 2, baseline: base,
+                                 font: pctFont, color: pctColor, shadow: true)
+                    cx += pctW + timeGap
+                    drawBaseline(q.resetText, x: cx, baseline: base,
+                                 font: timeFont, color: white, shadow: true)
+                }
             }
-
-            // Bottom row: two bars stacked (5h top, 7d bottom).
-            // Only a real quota wall (blockKind quota-5h/7d) forces a full red
-            // bar; a model-only block (Opus/Fable capped, Haiku still usable)
-            // shows the real utilization tinted amber instead.
-            let singleBarH: CGFloat = 3
-            let u5h = quotaBlocked ? 1.0 : p.u5h
-            let u7d = quotaBlocked ? 1.0 : p.u7d
-            drawHBar(ctx: ctx, x: x, y: barY + singleBarH + 1, maxW: bw, h: singleBarH, util: u5h, blockKind: p.blockKind, disabled: disabled)
-            drawHBar(ctx: ctx, x: x, y: barY, maxW: bw, h: singleBarH, util: u7d, blockKind: p.blockKind, disabled: disabled)
-
-            x += bw
-            if i < profiles.count - 1 { x += gg }
         }
-    }
-
-    func drawHBar(ctx: CGContext, x: CGFloat, y: CGFloat, maxW: CGFloat, h: CGFloat, util: Double, blockKind: String?, disabled: Bool = false) {
-        ctx.setFillColor(NSColor.white.withAlphaComponent(disabled ? 0.2 : 0.5).cgColor)
-        let trackPath = CGPath(roundedRect: CGRect(x: x, y: y, width: maxW, height: h), cornerWidth: 1, cornerHeight: 1, transform: nil)
-        ctx.addPath(trackPath)
-        ctx.fillPath()
-
-        let fillW = max(maxW * 0.03, maxW * util)
-        let color: NSColor
-        if disabled { color = NSColor.white.withAlphaComponent(0.3) }
-        else if blockKind == "quota-5h" || blockKind == "quota-7d" || allExhausted { color = .systemRed }
-        else if blockKind == "model" { color = .systemOrange }
-        else if util < 0.5 { color = .systemGreen }
-        else if util < 0.8 { color = .systemOrange }
-        else { color = .systemRed }
-
-        ctx.setFillColor(color.cgColor)
-        let fillPath = CGPath(roundedRect: CGRect(x: x, y: y, width: fillW, height: h), cornerWidth: 1, cornerHeight: 1, transform: nil)
-        ctx.addPath(fillPath)
-        ctx.fillPath()
     }
 }
 
-class AccountMenuItemView: NSView {
-    let profile: Profile
-    let isLast: Bool
-    
-    init(profile: Profile, isLast: Bool) {
-        self.profile = profile
-        self.isLast = isLast
-        super.init(frame: NSRect(x: 0, y: 0, width: 320, height: isLast ? 84 : 90))
+private extension Int {
+    var double: CGFloat { CGFloat(self) }
+}
+
+// MARK: - Menu rows
+
+private let menuW: CGFloat = 400
+
+func headerRow(_ text: String) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 20))
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 10, weight: .semibold)
+    label.textColor = .secondaryLabelColor
+    label.frame = NSRect(x: 16, y: 3, width: 300, height: 15)
+    view.addSubview(label)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+// Sezione provider: tile con l'icona del brand + nome. Senza icona
+// (altri account) il testo resta allineato alla stessa colonna.
+func sectionRow(_ text: String, providerId: String?) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 26))
+    if let id = providerId {
+        let icon = NSImageView(frame: NSRect(x: 14, y: 4, width: 18, height: 18))
+        icon.image = providerIcon(id)
+        view.addSubview(icon)
     }
-    required init?(coder: NSCoder) { fatalError() }
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 12, weight: .semibold)
+    label.textColor = .labelColor
+    label.frame = NSRect(x: 38, y: 4, width: menuW - 54, height: 18)
+    view.addSubview(label)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+func shortDate(_ iso: String) -> String {
+    let parts = iso.split(separator: "-")
+    guard parts.count == 3, let m = Int(parts[1]), (1...12).contains(m),
+          let d = Int(parts[2]) else { return iso }
+    let mesi = ["", "gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"]
+    return "\(d) \(mesi[m])"
+}
 
-        let leftPad: CGFloat = 16
-        let barX: CGFloat = 52
-        let barW: CGFloat = 160
-        let barH: CGFloat = 8
-        let pctX: CGFloat = barX + barW + 8
-        let resetX: CGFloat = pctX + 34
+func accountRow(_ a: Account) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 28))
+    let dot = NSView(frame: NSRect(x: 19, y: 10, width: 8, height: 8))
+    dot.wantsLayer = true
+    dot.layer?.cornerRadius = 4
+    dot.layer?.backgroundColor = statusColor(a.status).cgColor
+    view.addSubview(dot)
+    let label = NSTextField(labelWithString: a.label)
+    label.font = .systemFont(ofSize: 12, weight: a.active ? .semibold : .regular)
+    label.textColor = .labelColor
+    label.frame = NSRect(x: 38, y: 5, width: 200, height: 18)
+    label.lineBreakMode = .byTruncatingTail
+    view.addSubview(label)
+    // a destra la quota peggiore: il colpo d'occhio che conta
+    if let worst = a.quotas.max(by: { $0.usedPct < $1.usedPct }) {
+        let right = NSTextField(labelWithString: "\(worst.key.uppercased()) \(worst.usedPct)% · ↻ \(worst.resetText)")
+        right.font = .systemFont(ofSize: 11)
+        right.textColor = .secondaryLabelColor
+        right.alignment = .right
+        right.frame = NSRect(x: 244, y: 6, width: menuW - 260, height: 16)
+        view.addSubview(right)
+    }
+    let item = NSMenuItem()
+    item.view = view
+    item.toolTip = a.id
+    return item
+}
 
-        // Account name + status
-        let active = profile.isActive == true
-        let limited = profile.isLimited
-        let quotaBlocked = profile.isQuotaBlocked
-        let modelBlocked = profile.isModelBlocked
-        let authBlocked = profile.isAuthBlocked
-        let disabled = profile.isDisabled
-        var name = profile.displayName
-        if active { name += " ●" }
+// Riga quota: tag finestra + barra di progresso + % + tempo residuo.
+// Solo viste layer-backed, niente draw custom: si renderizza anche offscreen.
+func quotaBarRow(_ q: Quota) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 24))
+    let key = NSTextField(labelWithString: q.key.uppercased())
+    key.font = .systemFont(ofSize: 11, weight: .semibold)
+    key.textColor = .labelColor
+    key.frame = NSRect(x: 38, y: 4, width: 26, height: 16)
+    view.addSubview(key)
+    let barX: CGFloat = 68
+    let barW: CGFloat = 170
+    let track = NSView(frame: NSRect(x: barX, y: 8, width: barW, height: 9))
+    track.wantsLayer = true
+    track.layer?.cornerRadius = 4.5
+    track.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+    let fw = barW * CGFloat(min(100, max(0, q.usedPct))) / 100
+    if fw > 1 {
+        let fill = NSView(frame: NSRect(x: 0, y: 0, width: fw, height: 9))
+        fill.wantsLayer = true
+        fill.layer?.cornerRadius = 4.5
+        fill.layer?.backgroundColor = statusColor(q.status).cgColor
+        track.addSubview(fill)
+    }
+    view.addSubview(track)
+    let pct = NSTextField(labelWithString: "\(q.usedPct)%")
+    pct.font = .systemFont(ofSize: 11, weight: .semibold)
+    pct.textColor = q.status == "ok" ? .labelColor : statusColor(q.status)
+    pct.alignment = .right
+    pct.frame = NSRect(x: 242, y: 4, width: 38, height: 16)
+    view.addSubview(pct)
+    let time = NSTextField(labelWithString: "↻ \(q.resetText)")
+    time.font = .systemFont(ofSize: 11)
+    time.textColor = .secondaryLabelColor
+    time.frame = NSRect(x: 286, y: 4, width: menuW - 302, height: 16)
+    view.addSubview(time)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
 
-        // blockKind is the authoritative reason (quota/model/auth wall), unlike
-        // isLimited/fiveH.status which bounce on transient probe failures —
-        // it takes priority over the softer unified-utilization LIMITED signal.
-        // DISABLED (opt-out) overrides everything.
-        let statusText: String
-        let statusColor: NSColor
-        if disabled {
-            statusText = "OFF"
-            statusColor = .tertiaryLabelColor
-        } else if quotaBlocked {
-            statusText = "PIENO → \(profile.retryAfterDateText)"
-            statusColor = .systemRed
-        } else if modelBlocked {
-            statusText = "GRANDI → \(profile.retryAfterDateText)"
-            statusColor = .systemOrange
-        } else if authBlocked {
-            statusText = "AUTH"
-            statusColor = .systemYellow
-        } else if profile.rateLimits?.fiveH?.status == "rejected" {
-            statusText = "REJECTED"
-            statusColor = .systemRed
-        } else if limited {
-            statusText = "LIMITED"
-            statusColor = .systemOrange
+func renewalRow(_ r: Renewal, providerName: String = "", accountLabels: Set<String> = []) -> NSMenuItem {
+    // Sotto l'header del provider non ripetere né il suo nome né gli account già elencati sopra.
+    var service = r.service
+    if !providerName.isEmpty, service.lowercased().hasPrefix(providerName.lowercased() + " ") {
+        service = String(service.dropFirst(providerName.count + 1))
+    }
+    var text = service
+    if !r.account.isEmpty, r.account != r.service, !accountLabels.contains(r.account) {
+        text += " — \(r.account)"
+    }
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 10.5)
+    label.textColor = .secondaryLabelColor
+    label.frame = NSRect(x: 38, y: 4, width: 196, height: 15)
+    label.lineBreakMode = .byTruncatingTail
+    view.addSubview(label)
+    let detail = [r.amount, r.renewsAt.map { "↻ \(shortDate($0))" } ?? r.cycle].joined(separator: " · ")
+    let right = NSTextField(labelWithString: detail)
+    right.font = .systemFont(ofSize: 10.5)
+    right.textColor = .tertiaryLabelColor
+    right.alignment = .right
+    right.frame = NSRect(x: 238, y: 4, width: menuW - 254, height: 15)
+    view.addSubview(right)
+    let item = NSMenuItem()
+    item.view = view
+    item.toolTip = r.note.isEmpty ? nil : r.note
+    return item
+}
+
+// Riga del bonus cloud: stesso scheletro di renewalRow (label + dettaglio).
+func creditRow(_ c: CloudCredit) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
+    let label = NSTextField(labelWithString: "Bonus cloud Max")
+    label.font = .systemFont(ofSize: 10.5)
+    label.textColor = .secondaryLabelColor
+    label.frame = NSRect(x: 38, y: 4, width: 196, height: 15)
+    view.addSubview(label)
+    let amount = String(format: "$%.2f", c.remaining)
+        + (c.limit.map { String(format: " di $%.0f", $0) } ?? "")
+    let detail = [amount, c.renewsAt.map { "scade \(shortDate($0))" } ?? ""]
+        .filter { !$0.isEmpty }.joined(separator: " · ")
+    let right = NSTextField(labelWithString: detail)
+    right.font = .systemFont(ofSize: 10.5)
+    right.textColor = .tertiaryLabelColor
+    right.alignment = .right
+    right.frame = NSRect(x: 238, y: 4, width: menuW - 254, height: 15)
+    view.addSubview(right)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+func emailRow(_ email: String) -> NSMenuItem {
+    // Email solo-fattura (non un account live): intestazione tenue senza pallino.
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
+    let label = NSTextField(labelWithString: email)
+    label.font = .systemFont(ofSize: 11)
+    label.textColor = .secondaryLabelColor
+    label.frame = NSRect(x: 38, y: 3, width: menuW - 54, height: 16)
+    label.lineBreakMode = .byTruncatingTail
+    view.addSubview(label)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+// Rinnovi raggruppati per email con la sua intestazione; le righe
+// auto-nominate (service == account) restano da sole senza intestazione.
+func addGroupedRenewals(_ rows: [Renewal], providerName: String, baseLabels: Set<String>,
+                        menu: NSMenu, shown: inout Set<String>) {
+    var keys: [String] = []
+    for r in rows where !shown.contains(r.service + "|" + r.account) {
+        if !keys.contains(r.account) { keys.append(r.account) }
+    }
+    for k in keys {
+        let rs = rows.filter { $0.account == k && !shown.contains($0.service + "|" + $0.account) }
+        if rs.allSatisfy({ $0.service == $0.account }) {
+            for r in rs {
+                menu.addItem(renewalRow(r, providerName: providerName, accountLabels: baseLabels))
+                shown.insert(r.service + "|" + r.account)
+            }
         } else {
-            statusText = ""
-            statusColor = .clear
-        }
-
-        // Measure the status badge first so the name can be truncated to leave
-        // room for it — otherwise a long email name runs under the badge.
-        let statusAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 9, weight: .bold),
-            .foregroundColor: statusColor
-        ]
-        let statusW = statusText.isEmpty ? 0 : (statusText as NSString).size(withAttributes: statusAttrs).width
-
-        let nameColor: NSColor
-        if disabled { nameColor = .tertiaryLabelColor }
-        else if quotaBlocked { nameColor = .systemRed }
-        else if modelBlocked { nameColor = .systemOrange }
-        else if limited { nameColor = .systemOrange }
-        else { nameColor = .labelColor }
-        var nameAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 12, weight: active ? .semibold : .regular),
-            .foregroundColor: nameColor
-        ]
-        if disabled { nameAttrs[.strikethroughStyle] = NSUnderlineStyle.single.rawValue }
-        let namePara = NSMutableParagraphStyle()
-        namePara.lineBreakMode = .byTruncatingTail
-        nameAttrs[.paragraphStyle] = namePara
-        let nameMaxW = max(40, bounds.width - leftPad * 2 - statusW - 8)
-        (name as NSString).draw(in: NSRect(x: leftPad, y: bounds.height - 19, width: nameMaxW, height: 16), withAttributes: nameAttrs)
-
-        if !statusText.isEmpty {
-            (statusText as NSString).draw(at: NSPoint(x: bounds.width - leftPad - statusW, y: bounds.height - 16), withAttributes: statusAttrs)
-        }
-
-        // 5h bar + reset. Only a real quota wall forces the bar full; a
-        // model-only block shows the real utilization tinted amber.
-        let y5h = bounds.height - 34
-        drawLabel("5h", at: NSPoint(x: leftPad, y: y5h - 1))
-        drawBar(ctx: ctx, x: barX, y: y5h, w: barW, h: barH, util: quotaBlocked ? 1.0 : profile.u5h, blockKind: profile.blockKind, disabled: disabled)
-        drawPct(profile.u5h, at: NSPoint(x: pctX, y: y5h - 1))
-        drawReset(profile.hoursToReset5h, at: NSPoint(x: resetX, y: y5h - 1))
-
-        // 7d bar + reset
-        let y7d = bounds.height - 50
-        drawLabel("7d", at: NSPoint(x: leftPad, y: y7d - 1))
-        drawBar(ctx: ctx, x: barX, y: y7d, w: barW, h: barH, util: quotaBlocked ? 1.0 : profile.u7d, blockKind: profile.blockKind, disabled: disabled)
-        drawPct(profile.u7d, at: NSPoint(x: pctX, y: y7d - 1))
-        drawReset(profile.hoursToReset7d, at: NSPoint(x: resetX, y: y7d - 1))
-
-        // My usage on this (possibly shared) account
-        if let my7d = profile.myTokens7d, my7d > 0 {
-            let youY = bounds.height - 66
-            let youAttrs: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 9, weight: .regular),
-                .foregroundColor: NSColor.tertiaryLabelColor
-            ]
-            ("Tu: \(Profile.formatTokens(my7d)) tok / 7d" as NSString).draw(at: NSPoint(x: leftPad, y: youY), withAttributes: youAttrs)
-        }
-
-        // Separator
-        if !isLast {
-            ctx.setFillColor(NSColor.separatorColor.cgColor)
-            ctx.fill(CGRect(x: leftPad, y: 2, width: bounds.width - leftPad * 2, height: 0.5))
-        }
-    }
-    
-    func drawLabel(_ text: String, at point: NSPoint) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: 10, weight: .medium),
-            .foregroundColor: NSColor.tertiaryLabelColor
-        ]
-        (text as NSString).draw(at: point, withAttributes: attrs)
-    }
-    
-    func drawPct(_ util: Double, at point: NSPoint) {
-        let pct = "\(Int(util * 100))%"
-        let color: NSColor
-        if util < 0.5 { color = .secondaryLabelColor }
-        else if util < 0.8 { color = .systemOrange }
-        else { color = .systemRed }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
-            .foregroundColor: color
-        ]
-        (pct as NSString).draw(at: point, withAttributes: attrs)
-    }
-    
-    func drawReset(_ text: String, at point: NSPoint) {
-        guard !text.isEmpty else { return }
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .regular),
-            .foregroundColor: NSColor.tertiaryLabelColor
-        ]
-        ("↻\(text)" as NSString).draw(at: point, withAttributes: attrs)
-    }
-    
-    func drawBar(ctx: CGContext, x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat, util: Double, blockKind: String?, disabled: Bool = false) {
-        // Track
-        let trackPath = CGPath(roundedRect: CGRect(x: x, y: y, width: w, height: h), cornerWidth: 3, cornerHeight: 3, transform: nil)
-        ctx.setFillColor(NSColor.white.withAlphaComponent(disabled ? 0.2 : 0.5).cgColor)
-        ctx.addPath(trackPath)
-        ctx.fillPath()
-
-        // Fill
-        let fillW = max(w * 0.02, w * util)
-        let color: NSColor
-        if disabled { color = NSColor.white.withAlphaComponent(0.3) }
-        else if blockKind == "quota-5h" || blockKind == "quota-7d" { color = .systemRed }
-        else if blockKind == "model" { color = .systemOrange }
-        else if util < 0.5 { color = .systemGreen }
-        else if util < 0.8 { color = .systemOrange }
-        else { color = .systemRed }
-
-        let fillPath = CGPath(roundedRect: CGRect(x: x, y: y, width: fillW, height: h), cornerWidth: 3, cornerHeight: 3, transform: nil)
-        ctx.setFillColor(color.cgColor)
-        ctx.addPath(fillPath)
-        ctx.fillPath()
-    }
-}
-
-class FooterMenuItemView: NSView {
-    let strategy: String?
-    let reset: String?
-    
-    init(strategy: String?, reset: String?) {
-        self.strategy = strategy
-        self.reset = reset
-        let h: CGFloat = (strategy != nil && reset != nil) ? 36 : 22
-        super.init(frame: NSRect(x: 0, y: 0, width: 340, height: h))
-    }
-    required init?(coder: NSCoder) { fatalError() }
-    
-    override func draw(_ dirtyRect: NSRect) {
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.tertiaryLabelColor
-        ]
-        var y = bounds.height - 16
-        if let s = strategy {
-            ("Strategy: \(s)" as NSString).draw(at: NSPoint(x: 16, y: y), withAttributes: attrs)
-            y -= 16
-        }
-        if let r = reset, r != "unknown" {
-            ("Next reset: \(r)" as NSString).draw(at: NSPoint(x: 16, y: y), withAttributes: attrs)
+            menu.addItem(emailRow(k))
+            for r in rs {
+                menu.addItem(renewalRow(r, providerName: providerName,
+                                        accountLabels: baseLabels.union([k])))
+                shown.insert(r.service + "|" + r.account)
+            }
         }
     }
 }
 
-// MARK: - App Delegate
+func legendRow(_ text: String) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 18))
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 10)
+    label.textColor = .tertiaryLabelColor
+    label.frame = NSRect(x: 16, y: 3, width: menuW - 32, height: 15)
+    view.addSubview(label)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+func infoRow(_ text: String) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 28))
+    let label = NSTextField(labelWithString: text)
+    label.font = .systemFont(ofSize: 11)
+    label.textColor = .secondaryLabelColor
+    label.frame = NSRect(x: 16, y: 5, width: menuW - 32, height: 18)
+    view.addSubview(label)
+    let item = NSMenuItem()
+    item.view = view
+    return item
+}
+
+// MARK: - App
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
     var barView: UsageBarView!
     var timer: Timer?
-    var profiles: [Profile] = []
-    var allExhausted = false
-    var earliestReset: String?
-    var rotationStrategy: String?
+    var snapshot: Overview?
     var isOffline = false
-    var passthrough = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
-        barView = UsageBarView(frame: NSRect(x: 0, y: 0, width: barView(for: []).idealWidth(), height: 22))
+        barView = UsageBarView(frame: NSRect(x: 0, y: 0, width: 26, height: 22))
         statusItem.button?.addSubview(barView)
-        statusItem.length = barView.idealWidth()
-        
+        statusItem.length = 26
         fetchData()
-        timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             self?.fetchData()
         }
     }
-    
-    func barView(for profiles: [Profile]) -> UsageBarView {
-        let v = UsageBarView()
-        v.profiles = profiles
-        return v
-    }
 
     func fetchData() {
-        guard let url = URL(string: "http://localhost:3335/api/profiles") else { return }
-        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, error in
+        guard let url = URL(string: "http://localhost:3337/api/overview") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 55
+        let task = URLSession.shared.dataTask(with: req) { [weak self] data, _, error in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if error != nil || data == nil {
                     self.isOffline = true
-                    self.updateUI()
-                    return
-                }
-                do {
-                    let resp = try JSONDecoder().decode(APIResponse.self, from: data!)
-                    self.profiles = resp.profiles
-                    self.allExhausted = resp.allExhausted
-                    self.earliestReset = resp.earliestReset
-                    self.rotationStrategy = resp.rotationStrategy
-                    self.passthrough = resp.passthrough
-                    self.isOffline = false
-                } catch {
-                    self.isOffline = true
+                } else {
+                    do {
+                        self.snapshot = try JSONDecoder().decode(Overview.self, from: data!)
+                        self.isOffline = false
+                    } catch {
+                        self.isOffline = true
+                    }
                 }
                 self.updateUI()
             }
         }
         task.resume()
     }
-    
+
     func updateUI() {
-        // Update bar view in menu bar
-        barView.profiles = profiles
+        barView.snapshot = snapshot
         barView.isOffline = isOffline
-        barView.allExhausted = allExhausted
-        barView.earliestReset = earliestReset
-        barView.passthrough = passthrough
-        
         let newWidth = barView.idealWidth()
         barView.frame = NSRect(x: 0, y: 0, width: newWidth, height: 22)
         statusItem.length = newWidth
+        if isOffline {
+            statusItem.button?.toolTip = "usage-server offline (:3337)"
+        } else {
+            let parts = (snapshot?.providers ?? []).flatMap { $0.accounts ?? [] }
+                .map { "\($0.label) (\($0.code)): \($0.quotas.map { "\($0.key.uppercased()) \($0.usedPct)% ↻\($0.resetText)" }.joined(separator: " "))" }
+            statusItem.button?.toolTip = parts.joined(separator: "\n")
+        }
         barView.needsDisplay = true
-        
         rebuildMenu()
     }
 
     func rebuildMenu() {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        
-        // Title
-        let titleView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 28))
-        let titleStr = "Claude Usage"
-        let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 13, weight: .bold),
-            .foregroundColor: NSColor.labelColor
-        ]
-        let titleLabel = NSTextField(labelWithAttributedString: NSAttributedString(string: titleStr, attributes: titleAttrs))
-        titleLabel.frame = NSRect(x: 16, y: 4, width: 200, height: 20)
-        titleView.addSubview(titleLabel)
-        let titleItem = NSMenuItem()
-        titleItem.view = titleView
-        menu.addItem(titleItem)
-        
-        menu.addItem(NSMenuItem.separator())
-
-        if !isOffline && passthrough {
-            let bypassView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 26))
-            let bypassLabel = NSTextField(labelWithString: "⚡ VDM in bypass — stai usando il login diretto")
-            bypassLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-            bypassLabel.textColor = .systemYellow
-            bypassLabel.frame = NSRect(x: 16, y: 4, width: 308, height: 18)
-            bypassView.addSubview(bypassLabel)
-            let bypassItem = NSMenuItem()
-            bypassItem.view = bypassView
-            menu.addItem(bypassItem)
-            menu.addItem(NSMenuItem.separator())
-        }
-
+        menu.addItem(headerRow("Usage"))
         if isOffline {
-            let offView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 30))
-            let offLabel = NSTextField(labelWithString: "⚡ Offline — cannot reach VDM")
-            offLabel.font = .systemFont(ofSize: 11)
-            offLabel.textColor = .secondaryLabelColor
-            offLabel.frame = NSRect(x: 16, y: 6, width: 260, height: 18)
-            offView.addSubview(offLabel)
-            let offItem = NSMenuItem()
-            offItem.view = offView
-            menu.addItem(offItem)
-        } else if profiles.isEmpty {
-            let emptyView = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 30))
-            let emptyLabel = NSTextField(labelWithString: "No accounts configured")
-            emptyLabel.font = .systemFont(ofSize: 11)
-            emptyLabel.textColor = .secondaryLabelColor
-            emptyLabel.frame = NSRect(x: 16, y: 6, width: 260, height: 18)
-            emptyView.addSubview(emptyLabel)
-            let emptyItem = NSMenuItem()
-            emptyItem.view = emptyView
-            menu.addItem(emptyItem)
+            menu.addItem(infoRow("⚡ Offline — cannot reach usage-server :3337"))
         } else {
-            for (i, p) in profiles.enumerated() {
-                let view = AccountMenuItemView(profile: p, isLast: i == profiles.count - 1)
-                let item = NSMenuItem()
-                item.view = view
-                menu.addItem(item)
+            menu.addItem(legendRow("Nella barra: 5H sopra, 7D sotto · % e tempo di reset per quota"))
+            menu.addItem(legendRow("Account affievolito: non attivo · ↻: reset o rinnovo"))
+            let providers = snapshot?.providers ?? []
+            let renewals = snapshot?.renewals ?? []
+            var shown = Set<String>()
+            for p in providers {
+                menu.addItem(sectionRow(p.name, providerId: p.id))
+                let accs = p.accounts ?? []
+                if let err = p.error {
+                    menu.addItem(infoRow("\(p.name): \(err)"))
+                } else if accs.isEmpty {
+                    menu.addItem(infoRow("nessun account"))
+                }
+                let labels = Set(accs.map { $0.label })
+                // Claude: solo i rinnovi degli account live vdm; gli altri
+                // finiscono tra gli orfani in Altro, senza perdersi.
+                let pren = renewals.filter {
+                    $0.provider == p.id && (p.id != "claude" || labels.contains($0.account))
+                }
+                for a in accs {
+                    menu.addItem(accountRow(a))
+                    for q in a.quotas {
+                        menu.addItem(quotaBarRow(q))
+                    }
+                    for r in pren where r.account == a.label {
+                        menu.addItem(renewalRow(r, providerName: p.name, accountLabels: labels))
+                        shown.insert(r.service + "|" + r.account)
+                    }
+                }
+                // Email solo-fattura: gruppo proprio con la sua intestazione,
+                // mai sotto l'account di un altro.
+                addGroupedRenewals(pren, providerName: p.name, baseLabels: labels,
+                                   menu: menu, shown: &shown)
+            }
+            let orphans = renewals.filter { !shown.contains($0.service + "|" + $0.account) }
+            if !orphans.isEmpty {
+                menu.addItem(sectionRow("Altri account (fuori VDM)", providerId: nil))
+                // Stesso raggruppamento per email, senza trattini né righe piatte.
+                addGroupedRenewals(orphans, providerName: "", baseLabels: [],
+                                   menu: menu, shown: &shown)
+            }
+            // Bonus cloud Max: solo se il server lo vede (tool personale).
+            if let c = snapshot?.credit {
+                menu.addItem(sectionRow("Credito AI", providerId: nil))
+                menu.addItem(creditRow(c))
             }
         }
-
         menu.addItem(NSMenuItem.separator())
-        
-        // Footer
-        if rotationStrategy != nil || earliestReset != nil {
-            let footerView = FooterMenuItemView(strategy: rotationStrategy, reset: earliestReset)
-            let footerItem = NSMenuItem()
-            footerItem.view = footerView
-            menu.addItem(footerItem)
-            menu.addItem(NSMenuItem.separator())
+        let refreshItem = NSMenuItem(title: "Refresh", action: #selector(refresh), keyEquivalent: "r")
+        refreshItem.target = self
+        menu.addItem(refreshItem)
+        // Dashboard = vdm (:3335, tool privato): mostrarla solo quando vdm
+        // risponde, altrove sarebbe un link morto.
+        let claudeErr = snapshot?.providers.first(where: { $0.id == "claude" })?.error
+        if !isOffline, claudeErr == nil {
+            let dashItem = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
+            dashItem.target = self
+            menu.addItem(dashItem)
         }
-
-        let dashItem = NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: "d")
-        dashItem.target = self
-        menu.addItem(dashItem)
-
         let quitItem = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
-
         statusItem.menu = menu
     }
+
+    @objc func refresh() { fetchData() }
 
     @objc func openDashboard() {
         NSWorkspace.shared.open(URL(string: "http://localhost:3335")!)
@@ -636,36 +623,3 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.terminate(nil)
     }
 }
-
-// MARK: - Main
-
-// Single instance guard via an advisory lock on the pidfile.
-//
-// A bare `kill(pid, 0)` is not a liveness test: macOS recycles PIDs, so a stale
-// file from a crashed tray eventually names an unrelated live process and the
-// guard exits(0) forever. Seen for real on 2026-08-30 — the file held 1120,
-// which by then belonged to `jcode serve`, so KeepAlive respawned the tray
-// 3360 times and it vanished from the menubar with no error anywhere.
-//
-// flock() cannot lie: the kernel drops the lock when the holder dies, whatever
-// happens to the PID. The file still carries the pid, for humans reading it.
-let pidFile = NSString(string: "~/.claude/account-switcher/usage-tray.pid").expandingTildeInPath
-let lockFD = open(pidFile, O_CREAT | O_RDWR, 0o644)
-if lockFD < 0 {
-    FileHandle.standardError.write("usage-tray: cannot open \(pidFile): \(String(cString: strerror(errno)))\n".data(using: .utf8)!)
-    exit(1)
-}
-if flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
-    // Another tray holds the lock: this one is the duplicate.
-    exit(0)
-}
-ftruncate(lockFD, 0)
-let pidBytes = Array("\(ProcessInfo.processInfo.processIdentifier)\n".utf8)
-_ = pidBytes.withUnsafeBufferPointer { write(lockFD, $0.baseAddress, $0.count) }
-// lockFD is deliberately never closed: the lock must outlive this scope.
-
-let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
