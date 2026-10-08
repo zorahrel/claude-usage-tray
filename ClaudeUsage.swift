@@ -10,9 +10,11 @@ struct Overview: Codable {
 }
 
 struct CloudCredit: Codable {
-    let remaining: Double
+    let remaining: Double?
     let limit: Double?
     let renewsAt: String?
+    let account: String?
+    let unavailable: Bool?
 }
 
 struct Provider: Codable {
@@ -395,17 +397,27 @@ func renewalRow(_ r: Renewal, providerName: String = "", accountLabels: Set<Stri
 }
 
 // Riga del bonus cloud: stesso scheletro di renewalRow (label + dettaglio).
+// Senza saldo (throttle 429) la riga resta e dice che aggiorna: sparire
+// e riapparire confonde più di un'attesa dichiarata.
 func creditRow(_ c: CloudCredit) -> NSMenuItem {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
-    let label = NSTextField(labelWithString: "Bonus cloud Max")
+    var title = "Bonus cloud Max"
+    if let email = c.account, !email.isEmpty { title += " — \(email)" }
+    let label = NSTextField(labelWithString: title)
     label.font = .systemFont(ofSize: 10.5)
     label.textColor = .secondaryLabelColor
     label.frame = NSRect(x: 38, y: 4, width: 196, height: 15)
+    label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
-    let amount = String(format: "$%.2f", c.remaining)
-        + (c.limit.map { String(format: " di $%.0f", $0) } ?? "")
-    let detail = [amount, c.renewsAt.map { "scade \(shortDate($0))" } ?? ""]
-        .filter { !$0.isEmpty }.joined(separator: " · ")
+    let detail: String
+    if let left = c.remaining {
+        let amount = String(format: "$%.2f", left)
+            + (c.limit.map { String(format: " di $%.0f", $0) } ?? "")
+        detail = [amount, c.renewsAt.map { "scade \(shortDate($0))" } ?? ""]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
+    } else {
+        detail = "in aggiornamento…"
+    }
     let right = NSTextField(labelWithString: detail)
     right.font = .systemFont(ofSize: 10.5)
     right.textColor = .tertiaryLabelColor
@@ -584,7 +596,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             let orphans = renewals.filter { !shown.contains($0.service + "|" + $0.account) }
             if !orphans.isEmpty {
-                menu.addItem(sectionRow("Altri account (fuori VDM)", providerId: nil))
+                menu.addItem(sectionRow("Altri abbonamenti (fuori rotazione)", providerId: nil))
                 // Stesso raggruppamento per email, senza trattini né righe piatte.
                 addGroupedRenewals(orphans, providerName: "", baseLabels: [],
                                    menu: menu, shown: &shown)

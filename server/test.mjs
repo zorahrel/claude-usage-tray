@@ -141,6 +141,17 @@ describe("parseCloudCredit", () => {
     assert.equal(parseCloudCredit(null), null);
     assert.equal(parseCloudCredit("xx"), null);
   });
+  it("creditAccount: legge l'email loggata o null", async () => {
+    const { creditAccount } = await import("./probes/cloud-credit.mjs");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "tray-home-"));
+    fs.writeFileSync(path.join(home, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "ada@example.com" } }));
+    assert.equal(creditAccount(home), "ada@example.com");
+    assert.equal(creditAccount(home + "-missing"), null);
+  });
   it("liveQuiet: fresco tace, vecchio o mancante riprova", async () => {
     const { liveQuiet } = await import("./probes/cloud-credit.mjs");
     const { writeFileSync } = await import("node:fs");

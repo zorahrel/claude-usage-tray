@@ -40,11 +40,24 @@ function markLiveFailed(failPath = QUIET_PATH) {
   } catch { /* tmp non scrivibile: si riprova sempre, nessun danno */ }
 }
 
+// Il bonus è dell'account loggato (quello attivo in vdm): stessa sorgente
+// che usa credito-cloud, l'email in ~/.claude.json → oauthAccount.
+export function creditAccount(home = os.homedir()) {
+  try {
+    const j = JSON.parse(readFileSync(path.join(home, ".claude.json"), "utf8"));
+    const email = j?.oauthAccount?.emailAddress;
+    return typeof email === "string" && email.includes("@") ? email : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function probeCloudCredit() {
-  if (liveQuiet()) return null;
   const bin = path.join(os.homedir(), "bin", "credito-cloud");
+  if (!existsSync(bin)) return null; // tool assente: sezione nascosta
+  const account = creditAccount();
+  if (liveQuiet()) return { unavailable: true, account };
   const live = await new Promise((resolve) => {
-    if (!existsSync(bin)) return resolve(null);
     execFile(bin, ["--json"], { timeout: 25000 }, (err, stdout) => {
       if (err) return resolve(null);
       try {
@@ -54,6 +67,9 @@ export async function probeCloudCredit() {
       }
     });
   });
-  if (!live) markLiveFailed();
-  return live;
+  if (!live) {
+    markLiveFailed();
+    return { unavailable: true, account };
+  }
+  return { ...live, account };
 }
