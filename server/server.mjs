@@ -104,23 +104,34 @@ function toEpoch(iso) {
   return Number.isNaN(t) ? null : Math.floor(t / 1000);
 }
 
-function mapMuse(out) {
+// Oltre 10 minuti (due giri di cache della sonda) il dato Muse è vecchio: grigio
+// e con l'età, mai spacciato per attuale (09/10: tray su 80% con quota a 101%).
+const MUSE_STALE_S = 600;
+
+function staleText(asOf, now = Math.floor(Date.now() / 1000)) {
+  const m = Math.floor((now - asOf) / 60);
+  return m < 60 ? `dato di ${m}m fa` : `dato di ${Math.floor(m / 60)}h fa`;
+}
+
+function mapMuse(out, now = Math.floor(Date.now() / 1000)) {
   if (!out || !Array.isArray(out.quotas) || out.quotas.length === 0) {
     return { id: "muse", name: "Muse", error: "no data" };
   }
+  const stale = typeof out.asOf === "number" && now - out.asOf > MUSE_STALE_S;
   const quotas = out.quotas.map((q) => {
     const used = Math.round(100 - (q.percentRemaining ?? 0));
     const resetsAt = toEpoch(q.resetsAt);
     return { key: q.type === "session" ? "5h" : q.type === "weekly" ? "7d" : q.type,
-             usedPct: used, resetsAt, resetText: resetText(resetsAt),
-             status: statusFor(used, null) };
+             usedPct: used, resetsAt,
+             resetText: stale ? staleText(out.asOf, now) : resetText(resetsAt),
+             status: stale ? "stale" : statusFor(used, null) };
   });
   const worst = Math.max(...quotas.map((q) => q.usedPct));
   const email = out.email;
   const label = typeof email === "string" && email.includes("@") ? email : "Muse";
   return { id: "muse", name: "Muse",
            accounts: [{ id: "muse-code", label, code: code3("Muse"), active: true,
-                        status: statusFor(worst, null), quotas }] };
+                        status: stale ? "stale" : statusFor(worst, null), quotas }] };
 }
 
 function mapQuotas(out, id, name, accountId, accountLabel, email = null) {

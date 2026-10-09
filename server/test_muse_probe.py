@@ -24,12 +24,15 @@ class CacheLogic(unittest.TestCase):
         self.fail = os.path.join(self.tmp.name, "fail")
         self.p1 = mock.patch.object(muse_probe, "CACHE_PATH", self.cache)
         self.p2 = mock.patch.object(muse_probe, "FAIL_PATH", self.fail)
+        self.p3 = mock.patch.object(muse_probe, "RETRY_DELAY", 0)
         self.p1.start()
         self.p2.start()
+        self.p3.start()
 
     def tearDown(self):
         self.p1.stop()
         self.p2.stop()
+        self.p3.stop()
         self.tmp.cleanup()
 
     def run_main(self):
@@ -54,6 +57,7 @@ class CacheLogic(unittest.TestCase):
         with mock.patch.object(muse_probe, "read_token", return_value=None):
             out = self.run_main()
         self.assertEqual(out["quotas"][0]["percentRemaining"], 75.0)
+        self.assertEqual(out["asOf"], 1)  # la tray vede che è vecchio
         self.assertTrue(os.path.exists(self.fail))
         # secondo giro: non ritenta nemmeno il token (silenzio 15 min)
         with mock.patch.object(muse_probe, "read_token",
@@ -69,6 +73,15 @@ class CacheLogic(unittest.TestCase):
                                return_value=payload(used=10.0)):
             out = self.run_main()
         self.assertEqual(out["quotas"][0]["percentRemaining"], 90.0)
+        self.assertFalse(os.path.exists(self.fail))
+
+    def test_transient_token_miss_retries_once(self):
+        with mock.patch.object(muse_probe, "read_token",
+                               side_effect=[None, "tok"]), \
+             mock.patch.object(muse_probe, "fetch_subs",
+                               return_value=payload(used=101.0)):
+            out = self.run_main()
+        self.assertEqual(out["quotas"][0]["percentRemaining"], 0.0)
         self.assertFalse(os.path.exists(self.fail))
 
     def test_total_failure_prints_empty_quotas(self):

@@ -79,6 +79,17 @@ describe("mapMuse", () => {
     const q = mapMuse({ quotas: [{ type: "session", percentRemaining: 50, resetsAt: null }] });
     assert.equal(q.accounts[0].label, "Muse");
   });
+  it("dato vecchio: grigio con l'età, mai colore di quota attuale", () => {
+    const now = 1791556000;
+    const quotas = [{ type: "session", percentRemaining: 20, resetsAt: "2026-10-09T14:34:14Z" }];
+    const old = mapMuse({ quotas, asOf: now - 48 * 60 }, now);
+    assert.equal(old.accounts[0].status, "stale");
+    assert.equal(old.accounts[0].quotas[0].status, "stale");
+    assert.equal(old.accounts[0].quotas[0].resetText, "dato di 48m fa");
+    assert.equal(mapMuse({ quotas, asOf: now - 3 * 3600 }, now).accounts[0].quotas[0].resetText, "dato di 3h fa");
+    const fresh = mapMuse({ quotas, asOf: now - 60 }, now);
+    assert.equal(fresh.accounts[0].quotas[0].status, "warning");
+  });
 });
 
 describe("mapQuotas", () => {

@@ -22,6 +22,10 @@ CACHE_TTL = 300
 # Nel frattempo si serve la cache anche se vecchia.
 FAIL_PATH = "/tmp/usage-muse-fail"
 FAIL_QUIET = 900
+# Il token a volte manca per un attimo (09/10: 9 Muse in parallelo, una lettura
+# fallita ha congelato la tray su 80% mentre la quota era a 101%): un secondo
+# tentativo prima di dichiarare il fallimento.
+RETRY_DELAY = 2
 
 
 def read_token():
@@ -68,10 +72,10 @@ def load_cached():
         with open(CACHE_PATH) as f:
             cached = json.load(f)
         if time.time() - cached.get("at", 0) < CACHE_TTL:
-            return cached.get("payload")
+            return cached.get("payload"), cached.get("at")
     except (OSError, ValueError):
         pass
-    return None
+    return None, None
 
 
 def save_cache(payload):
@@ -87,9 +91,11 @@ def load_stale():
         with open(CACHE_PATH) as f:
             cached = json.load(f)
         payload = cached.get("payload")
-        return payload if isinstance(payload, dict) and payload else None
+        if isinstance(payload, dict) and payload:
+            return payload, cached.get("at")
     except (OSError, ValueError):
-        return None
+        pass
+    return None, None
 
 
 def failing_quietly():
@@ -123,20 +129,31 @@ def iso(ts):
         return None
 
 
+def fetch_fresh():
+    for attempt in range(2):
+        if attempt:
+            time.sleep(RETRY_DELAY)
+        token = read_token()
+        payload = fetch_subs(token) if token else None
+        if payload:
+            return payload
+    return None
+
+
 def main():
-    payload = load_cached()
+    payload, as_of = load_cached()
     if payload is None:
         if failing_quietly():
-            payload = load_stale()
+            payload, as_of = load_stale()
         else:
-            token = read_token()
-            payload = fetch_subs(token) if token else None
+            payload = fetch_fresh()
             if payload:
+                as_of = time.time()
                 save_cache(payload)
                 clear_failed()
             else:
                 mark_failed()
-                payload = load_stale()
+                payload, as_of = load_stale()
     quotas = []
     usage = (payload or {}).get("subs_usage")
     if isinstance(usage, dict):
@@ -158,8 +175,11 @@ def main():
             if resets:
                 q["resetsAt"] = resets
             quotas.append(q)
-    sys.stdout.write(json.dumps({"quotas": quotas,
-                                 "email": (payload or {}).get("user_email")}))
+    out = {"quotas": quotas, "email": (payload or {}).get("user_email")}
+    # Età del dato: la tray deve poter dire «vecchio», non spacciarlo per attuale.
+    if payload and isinstance(as_of, (int, float)):
+        out["asOf"] = int(as_of)
+    sys.stdout.write(json.dumps(out))
 
 
 
