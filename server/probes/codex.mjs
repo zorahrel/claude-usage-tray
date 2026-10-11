@@ -56,6 +56,16 @@ export function rpc(proc, msg) {
   });
 }
 
+// Reset manuali: availableCount fa fede (la lista può essere cappata),
+// dettaglio solo per gli available. Senza dati: null, mai inventati.
+export function mapResetCredits(rc) {
+  if (!rc || typeof rc.availableCount !== "number") return null;
+  const credits = Array.isArray(rc.credits) ? rc.credits
+    .filter((c) => c?.status === "available")
+    .map((c) => ({ title: c.title ?? null, expiresAt: c.expiresAt ?? null })) : [];
+  return { available: rc.availableCount, credits };
+}
+
 export async function probeCodex() {
   const proc = spawn(resolveCli(), CLI_ARGS, {
     stdio: ["pipe", "pipe", "ignore"],
@@ -75,7 +85,8 @@ export async function probeCodex() {
                                  resetsAt: r.primary.resetsAt ?? null });
     if (r.secondary) quotas.push({ key: "7d", usedPct: Math.round(r.secondary.usedPercent ?? 0),
                                    resetsAt: r.secondary.resetsAt ?? null });
-    return quotas.length ? { quotas, email: codexEmail() } : null;
+    const resetCredits = mapResetCredits(limits?.result?.rateLimitResetCredits);
+    return quotas.length ? { quotas, email: codexEmail(), resetCredits } : null;
   } catch {
     return null;
   } finally {

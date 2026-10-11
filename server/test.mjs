@@ -12,7 +12,7 @@ describe("resetText", () => {
     assert.equal(resetText(now + 4 * 3600 + 12 * 60), "4h12m");
     assert.equal(resetText(now + 2 * 86400 + 5 * 3600), "2d5h");
     assert.equal(resetText(now + 9 * 60), "9m");
-    assert.equal(resetText(now - 5), "now");
+    assert.equal(resetText(now - 5), "ora");
     assert.equal(resetText(null), "");
   });
 });
@@ -68,8 +68,14 @@ describe("mapMuse", () => {
     assert.equal(p.accounts[0].status, "ok");
   });
   it("senza dati segnala errore invece di inventare", () => {
-    assert.equal(mapMuse({ quotas: [] }).error, "no data");
-    assert.equal(mapMuse(null).error, "no data");
+    assert.equal(mapMuse({ quotas: [] }).error, "nessun dato");
+    assert.equal(mapMuse(null).error, "nessun dato");
+  });
+  it("account confermato senza quota resta visibile e lo dichiara", () => {
+    const p = mapMuse({ email: "io@x.it", quotas: [] });
+    assert.equal(p.error, "Muse non pubblica la quota");
+    assert.equal(p.accounts[0].label, "io@x.it");
+    assert.deepEqual(p.accounts[0].quotas, []);
   });
   it("label dall'email o dal nome", () => {
     const p = mapMuse({ email: "io@x.it",
@@ -104,7 +110,7 @@ describe("mapQuotas", () => {
     assert.equal(p.accounts[0].quotas[1].resetText, "");
   });
   it("vuoto diventa errore", () => {
-    assert.equal(mapQuotas(null, "x", "X", "x", "X").error, "no data");
+    assert.equal(mapQuotas(null, "x", "X", "x", "X").error, "nessun dato");
   });
   it("label dall'email, codice dal nome", () => {
     const p = mapQuotas({ quotas: [{ key: "5h", usedPct: 1, resetsAt: null }] },
@@ -213,6 +219,10 @@ describe("parseCloudCredit", () => {
     assert.deepEqual(mergeCredit(una, null), { credit: una, save: null });
     assert.deepEqual(mergeCredit(null, stale), { credit: stale, save: null });
     assert.deepEqual(mergeCredit(null, null), { credit: null, save: null });
+  });
+  it("mergeCredit: sonda stale (cache) si serve con la sua età, mai risalvata", () => {
+    const cached = { remaining: 9, stale: true, asOf: 1000 };
+    assert.deepEqual(mergeCredit(cached, null), { credit: cached, save: null });
   });
   it("liveQuiet: fresco tace, vecchio o mancante riprova", async () => {
     const { liveQuiet } = await import("./probes/cloud-credit.mjs");
@@ -336,6 +346,9 @@ describe("hub", () => {
     const nocap = { data: { label: "", usage: 2, limit: null } };
     assert.deepEqual(parseOpenRouter(nocap).quotas[0].limit, null);
     assert.equal(parseOpenRouter(nocap).label, "OpenRouter");
+    // chiave senza nome: l'API rimanda la chiave mascherata, si dichiara chiave
+    const masked = { data: { label: "sk-or-v1-987...be6", usage: 1, limit: 50 } };
+    assert.equal(parseOpenRouter(masked).label, "chiave …be6");
     assert.equal(parseOpenRouter({}), null);
     assert.equal(parseOpenRouter({ data: { usage: "x" } }), null);
   });
@@ -373,9 +386,100 @@ describe("hub", () => {
     const nolimit = { label: "T", quotas: [
       { key: "usd", used: 2, limit: null, unit: "$", reset: null, resetWord: null }] };
     assert.equal(mapHub("o", "O", nolimit).accounts[0].quotas[0].detail, "$2 spesi");
+    // senza tetto niente percentuale: unknown, mai uno 0% verde finto
+    assert.equal(mapHub("o", "O", nolimit).accounts[0].quotas[0].status, "unknown");
+    assert.equal(q.status, "ok");
     assert.equal(mapHub("e", "E", { error: "noperm" }).error,
       "chiave senza permesso user_read");
-    assert.equal(mapHub("x", "X", null).error, "no data");
+    assert.equal(mapHub("x", "X", null).error, "nessun dato");
+  });
+});
+
+describe("anthropic-api", () => {
+  it("saldo console: mantiene cifra, data e validità API senza inferirli dallo speso", async () => {
+    const { attachApiSpend } = await import("./server.mjs");
+    const { probeAnthropicApi } = await import("./probes/anthropic-api.mjs");
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "api-balance-")), "snapshot.json");
+    const snapshot = { account: "ada@example.com", remaining: 143.17,
+      source: "console", asOf: 1791568845, expiresAt: "2099-10-17" };
+    fs.writeFileSync(file, JSON.stringify(snapshot));
+    const out = await probeAnthropicApi(file);
+    const providers = [{ id: "claude", accounts: [{ label: "ada@example.com" }] }];
+    attachApiSpend(providers, out);
+    assert.match(providers[0].accounts[0].apiSpend.detail, /^\$143\.17 rilevati 09\/10$/);
+    assert.match(providers[0].accounts[0].apiSpend.note, /^saldo letto a mano 09\/10 .*solo API\/SDK · scade 17\/10$/);
+    assert.equal(providers[0].accounts[0].apiSpend.status, "unknown");
+    fs.writeFileSync(file, JSON.stringify({ ...snapshot, expiresAt: "2000-01-01" }));
+    assert.equal((await probeAnthropicApi(file)).error, "expired");
+    fs.writeFileSync(file, JSON.stringify({ remaining: 200 }));
+    assert.equal((await probeAnthropicApi(file)).error, "nodata");
+  });
+  it("console live: speso = concesso - residuo, scaduto ignorato, riga sotto guedado", async () => {
+    const { parseConsoleCredits, probeAnthropicConsole } = await import("./probes/anthropic-api.mjs");
+    const { attachApiSpend } = await import("./server.mjs");
+    const data = { promo_tranches: [
+      { granted_amount_minor_units: 20000, remaining_amount_minor_units: 12153, expires_at: "2099-10-17T00:00:00Z" },
+      { granted_amount_minor_units: 5000, remaining_amount_minor_units: 5000, expires_at: "2000-01-01T00:00:00Z" } ] };
+    assert.deepEqual(parseConsoleCredits(data),
+      { granted: 200, remaining: 121.53, spent: 78.47, expiresAt: "2099-10-17T00:00:00Z" });
+    assert.equal(parseConsoleCredits({ promo_tranches: [] }), null);
+    const ok = async () => ({ ok: true, json: async () => data });
+    process.env.USAGE_API_ACCOUNT = "me@example.com";
+    const out = await probeAnthropicConsole({ fetchImpl: ok, cookie: "x" });
+    const ps = [{ id: "claude", accounts: [{ label: "me@example.com" }, { label: "other@example.com" }] }];
+    attachApiSpend(ps, out);
+    assert.equal(ps[0].accounts[0].apiSpend.detail, "$121.53 rimasti");
+    assert.match(ps[0].accounts[0].apiSpend.note, /^\$78\.47 spesi su \$200\.00 · letto alle \d\d:\d\d$/);
+    // scadenza in resetsAt, niente testo di reset: non è un reset
+    assert.equal(ps[0].accounts[0].apiSpend.resetsAt, toEpoch("2099-10-17T00:00:00Z"));
+    assert.equal(ps[0].accounts[0].apiSpend.resetText, "");
+    assert.equal(ps[0].accounts[0].apiSpend.usedPct, 39);
+    assert.equal(ps[0].accounts[1].apiSpend, undefined);
+  });
+  it("sumCostReport: centesimi su più pagine, rotto ignorato", async () => {
+    const { sumCostReport } = await import("./probes/anthropic-api.mjs");
+    const pages = [
+      { data: [{ results: [{ amount: "123.78912" }, { amount: "50" }] },
+               { results: [{ amount: "xx" }] }] },
+      { data: [] },
+      null,
+    ];
+    assert.equal(sumCostReport(pages), 1.74);
+    assert.equal(sumCostReport([]), 0);
+    assert.equal(sumCostReport(null), 0);
+  });
+  it("classifyAnthropicError: timeout, permessi, http", async () => {
+    const { classifyAnthropicError } = await import("./probes/anthropic-api.mjs");
+    assert.equal(classifyAnthropicError(0, null), "timeout");
+    assert.equal(classifyAnthropicError(401, { error: { message: "admin only" } }), "noperm");
+    assert.equal(classifyAnthropicError(401, { error: { message: "invalid key" } }), "rejected");
+    assert.equal(classifyAnthropicError(500, null), "http500");
+  });
+  it("mapHub: la sonda api diventa riga a consumo coi numeri veri", () => {
+    const out = { label: "me@example.com", quotas: [
+      { key: "usd", used: 0.15, limit: 200, unit: "$", reset: null, resetWord: null }] };
+    const m = mapHub("anthropic-api", "Anthropic API", out);
+    assert.equal(m.menuOnly, true);
+    assert.equal(m.accounts[0].quotas[0].detail, "$0.15 su $200");
+  });
+  it("attachApiSpend: solo sotto guedado, mai sezione, mai senza dati", async () => {
+    const { attachApiSpend } = await import("./server.mjs");
+    const out = { label: "me@example.com", quotas: [
+      { key: "usd", used: 0.15, limit: 200, unit: "$", reset: null, resetWord: null }] };
+    const mk = () => [{ id: "claude", name: "Claude", accounts: [
+      { label: "me@example.com", quotas: [] },
+      { label: "other@example.com", quotas: [] } ] }];
+    const ps = mk();
+    attachApiSpend(ps, out);
+    assert.equal(ps[0].accounts[0].apiSpend.detail, "$0.15 su $200");
+    assert.equal(ps[0].accounts[1].apiSpend, undefined);
+    assert.equal(ps.length, 1); // nessuna sezione hub aggiunta
+    attachApiSpend(mk(), { error: "timeout" });
+    attachApiSpend(mk(), null);
+    attachApiSpend([{ id: "codex", accounts: [] }], out);
   });
 });
 
@@ -402,5 +506,38 @@ describe("toEpoch", () => {
     assert.equal(toEpoch("2026-10-06T21:10:18Z"), Date.parse("2026-10-06T21:10:18Z") / 1000);
     assert.equal(toEpoch(null), null);
     assert.equal(toEpoch("xx"), null);
+  });
+});
+
+describe("resetCredits", () => {
+  it("mapResetCredits: conteggio e soli available con titolo e scadenza", async () => {
+    const { mapResetCredits } = await import("./probes/codex.mjs");
+    const live = { availableCount: 1, credits: [
+      { id: "a", status: "available", title: "Full reset (Weekly + 5 hr)", expiresAt: 1794004915 },
+      { id: "b", status: "redeemed", title: "vecchio", expiresAt: null },
+    ] };
+    assert.deepEqual(mapResetCredits(live), { available: 1, credits: [
+      { title: "Full reset (Weekly + 5 hr)", expiresAt: 1794004915 }] });
+  });
+  it("mapResetCredits: senza dati dà null, mai eccezioni", async () => {
+    const { mapResetCredits } = await import("./probes/codex.mjs");
+    assert.equal(mapResetCredits(null), null);
+    assert.equal(mapResetCredits({}), null);
+    assert.equal(mapResetCredits({ availableCount: "1" }), null);
+  });
+  it("mapQuotas: resetCredits passati all'account, null se assenti", () => {
+    const rc = { available: 2, credits: [] };
+    const p = mapQuotas({ quotas: [{ key: "5h", usedPct: 1, resetsAt: null }], resetCredits: rc },
+                        "codex", "Codex", "codex", "Codex");
+    assert.deepEqual(p.accounts[0].resetCredits, rc);
+    const q = mapQuotas({ quotas: [{ key: "5h", usedPct: 1, resetsAt: null }] },
+                        "codex", "Codex", "codex", "Codex");
+    assert.equal(q.accounts[0].resetCredits, null);
+  });
+  it("mapClaude: reset manuali ignoti, mai inventati", () => {
+    const vdm = { profiles: [{ name: "a", label: "ada@example.com", isActive: true,
+      rateLimits: { fiveH: { utilization: 0.1, reset: 1 },
+                    sevenD: { utilization: 0.2, reset: 1 } } }] };
+    assert.equal(mapClaude(vdm).accounts[0].resetCredits, null);
   });
 });

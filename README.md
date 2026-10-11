@@ -92,6 +92,13 @@ origins smear at 1x. Window tags are 7pt semibold capitals: lowercase
 ascenders would kiss the 8px icon above them. See the comments in
 `ClaudeUsage.swift`, they explain each number.
 
+The dropdown menu uses one grid (`MenuGrid`): every row under an account
+puts tag, bar, % and detail on the same x, and every bar (5h/7d quotas,
+API credit, cloud bonus, hub credits) has the same width, derived from the
+columns rather than typed. Bar and % always show what is used up (full and
+red = gone); the text on the right says reset, balance or expiry. No known
+limit means no bar and "—", never a made-up 0%.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

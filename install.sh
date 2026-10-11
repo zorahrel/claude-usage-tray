@@ -44,6 +44,11 @@ cat > "$AGENTS/$SRV_LABEL.plist" <<EOF
         <string>$NODE</string>
         <string>$PWD/server/server.mjs</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>USAGE_API_ACCOUNT</key>
+        <string>${USAGE_API_ACCOUNT:-}</string>
+    </dict>
     <key>KeepAlive</key>
     <true/>
     <key>RunAtLoad</key>

@@ -32,6 +32,14 @@ async function get(url, headers) {
   }
 }
 
+// Chiave senza nome: OpenRouter rimanda la chiave mascherata
+// ("sk-or-v1-987...be6") come label. In menu sembrerebbe un account:
+// si dichiara chiave, con le ultime 3 cifre per riconoscerla.
+function orLabel(label) {
+  if (typeof label !== "string" || !label) return "OpenRouter";
+  return /^sk-or-/.test(label) ? `chiave …${label.slice(-3)}` : label;
+}
+
 // --- OpenRouter: GET /api/v1/auth/key → spesa del mese sul tetto chiave.
 // Senza tetto (pay-per-use puro) il limite è null: si mostra la spesa.
 // Niente email nell'API: l'account è il nome della chiave.
@@ -40,7 +48,7 @@ export function parseOpenRouter(data) {
   if (!d || typeof d.usage !== "number") return null;
   const used = typeof d.usage_monthly === "number" ? d.usage_monthly : d.usage;
   return {
-    label: typeof d.label === "string" && d.label ? d.label : "OpenRouter",
+    label: orLabel(d.label),
     quotas: [{
       key: "usd",
       used: Math.round(used * 100) / 100,

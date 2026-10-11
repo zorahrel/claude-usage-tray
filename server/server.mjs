@@ -10,6 +10,7 @@ import { probeCodex } from "./probes/codex.mjs";
 import { probeCloudCredits, creditAccount, saveLastGood, loadLastGood,
          loadCreditMap, saveCreditMap, mergeCreditMap } from "./probes/cloud-credit.mjs";
 import { probeOpenRouter, probeEleven } from "./probes/hub.mjs";
+import { probeAnthropicApi, probeAnthropicConsole } from "./probes/anthropic-api.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3337;
@@ -17,7 +18,7 @@ const PORT = 3337;
 function resetText(epochSec) {
   if (!epochSec) return "";
   const secs = epochSec - Math.floor(Date.now() / 1000);
-  if (secs <= 0) return "now";
+  if (secs <= 0) return "ora";
   const d = Math.floor(secs / 86400);
   const h = Math.floor((secs % 86400) / 3600);
   const m = Math.floor((secs % 3600) / 60);
@@ -80,6 +81,9 @@ function mapClaude(vdm) {
         { key: "5h", usedPct: Math.round(u5), resetsAt: r5, resetText: resetText(r5), status: s5 },
         { key: "7d", usedPct: Math.round(u7), resetsAt: r7, resetText: resetText(r7), status: s7 },
       ],
+      // Reset manuali Claude: promo una tantum senza API (solo card in
+      // Settings → Usage su web/Desktop), quindi ignoti: null, mai zero.
+      resetCredits: null,
     };
   });
   return { id: "claude", name: "Claude", accounts };
@@ -114,8 +118,15 @@ function staleText(asOf, now = Math.floor(Date.now() / 1000)) {
 }
 
 function mapMuse(out, now = Math.floor(Date.now() / 1000)) {
+  // Da Muse 1.4.4 il mint può confermare l'account ma omettere subs_usage.
+  // Manteniamo l'account nel tray e dichiariamo l'assenza: sparire sarebbe
+  // ambiguo, inventare una percentuale sarebbe peggio.
+  const hasAccount = typeof out?.email === "string" && out.email.includes("@");
   if (!out || !Array.isArray(out.quotas) || out.quotas.length === 0) {
-    return { id: "muse", name: "Muse", error: "no data" };
+    if (!hasAccount) return { id: "muse", name: "Muse", error: "nessun dato" };
+    return { id: "muse", name: "Muse", error: "Muse non pubblica la quota",
+             accounts: [{ id: "muse-code", label: out.email, code: code3("Muse"),
+                          active: true, status: "stale", quotas: [], resetCredits: null }] };
   }
   const stale = typeof out.asOf === "number" && now - out.asOf > MUSE_STALE_S;
   const quotas = out.quotas.map((q) => {
@@ -131,12 +142,12 @@ function mapMuse(out, now = Math.floor(Date.now() / 1000)) {
   const label = typeof email === "string" && email.includes("@") ? email : "Muse";
   return { id: "muse", name: "Muse",
            accounts: [{ id: "muse-code", label, code: code3("Muse"), active: true,
-                        status: stale ? "stale" : statusFor(worst, null), quotas }] };
+                        status: stale ? "stale" : statusFor(worst, null), quotas, resetCredits: null }] };
 }
 
 function mapQuotas(out, id, name, accountId, accountLabel, email = null) {
   if (!out || !Array.isArray(out.quotas) || out.quotas.length === 0) {
-    return { id, name, error: "no data" };
+    return { id, name, error: "nessun dato" };
   }
   const quotas = out.quotas.map((q) => {
     const usedPct = Math.round(q.usedPct ?? 0);
@@ -147,14 +158,19 @@ function mapQuotas(out, id, name, accountId, accountLabel, email = null) {
   const label = typeof email === "string" && email.includes("@") ? email : accountLabel;
   return { id, name, accounts: [{ id: accountId, label,
     code: code3(accountLabel),
-    active: true, status: statusFor(worst, null), quotas }] };
+    active: true, status: statusFor(worst, null), quotas,
+    resetCredits: out.resetCredits ?? null }] };
 }
 
 // Decide la riga credito: live → salva e serve; in mancanza → stantio
 // con età (anche se il tool è sparito: l'età dice quanto vale); senza
-// niente → riga "in aggiornamento" o sezione nascosta.
+// niente → riga "in aggiornamento" o sezione nascosta. Una sonda stale
+// (ultimo buono in cache) si serve con la SUA età, mai risalvata: il
+// salvataggio la ringiovanirebbe a "adesso".
 export function mergeCredit(probe, last) {
-  if (probe && !probe.unavailable && !probe.nobonus) return { credit: probe, save: probe };
+  if (probe && !probe.unavailable && !probe.nobonus) {
+    return { credit: probe, save: probe.stale ? null : probe };
+  }
   if (last) return { credit: last, save: null };
   if (probe?.unavailable) return { credit: probe, save: null };
   return { credit: null, save: null };
@@ -179,13 +195,14 @@ const HUB_ERRORS = {
 };
 
 // Provider hub (solo menu, a consumo): quote con numeri assoluti nel
-// detail ("$1.05 su $50"). Senza dati: la riga dice cosa manca.
+// detail ("$1.05 su $50"). Senza dati: la riga dice cosa manca. Senza
+// tetto la percentuale non esiste: status "unknown", mai uno 0% finto.
 export function mapHub(id, name, out) {
   const base = { id, name, menuOnly: true, billing: "usage" };
   if (!out || out.error || !Array.isArray(out.quotas) || out.quotas.length === 0) {
     const err = out?.error;
     const text = HUB_ERRORS[err] ?? (typeof err === "string" && err.startsWith("http")
-      ? `HTTP ${err.slice(4)}` : "no data");
+      ? `HTTP ${err.slice(4)}` : "nessun dato");
     return { ...base, error: text };
   }
   const withUnit = (v, u) => (u === "$" ? `$${v}` : `${v}${u}`);
@@ -197,12 +214,12 @@ export function mapHub(id, name, out) {
       : `${withUnit(shortNum(q.used), q.unit)} spesi`;
     return { key: q.key, usedPct, resetsAt,
              resetText: q.resetWord ?? resetText(resetsAt),
-             status: statusFor(usedPct, null), detail };
+             status: q.limit > 0 ? statusFor(usedPct, null) : "unknown", detail };
   });
   const label = typeof out.label === "string" && out.label ? out.label : name;
   const worst = Math.max(...quotas.map((q) => q.usedPct));
   return { ...base, accounts: [{ id, label, code: code3(label), active: true,
-    status: statusFor(worst, null), quotas }] };
+    status: statusFor(worst, null), quotas, resetCredits: null }] };
 }
 
 // Profili vdm con Max: il bonus cloud spetta a ognuno, la sonda li gira
@@ -224,12 +241,13 @@ async function overview() {
   // vdm prima (locale, millisecondi): i nomi dei profili servono alla
   // sonda multipla. Il resto in parallelo: in sequenza supera i 55s della tray.
   const vdm = await fetchVdm().catch(() => null);
-  const [cx, museOut, probed, orOut, elOut] = await Promise.all([
+  const [cx, museOut, probed, orOut, elOut, apiOut] = await Promise.all([
     probeCodex(),
     runProbe("muse_probe.py"),
     probeCloudCredits(vdm ? bonusTargets(vdm) : []),
     probeOpenRouter(),
     probeEleven(),
+    probeAnthropicConsole().then((o) => (o.error ? probeAnthropicApi() : o)),
   ]);
   const providers = [];
   providers.push(vdm
@@ -241,6 +259,9 @@ async function overview() {
   for (const [id, name, out] of [["openrouter", "OpenRouter", orOut], ["elevenlabs", "ElevenLabs", elOut]]) {
     if (out && !out.error) providers.push(mapHub(id, name, out));
   }
+  // Speso API sotto il SUO account Claude (è dell'org guedado, come il
+  // bonus cloud: sezione propria duplicherebbe e confonde).
+  attachApiSpend(providers, apiOut);
   const login = creditAccount();
   const merged = mergeCredit(probed.find((p) => p.account === login) ?? null, loadLastGood());
   if (merged.save) saveLastGood(merged.save);
@@ -292,6 +313,56 @@ const server = http.createServer(async (req, res) => {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   server.listen(PORT, "127.0.0.1", () => console.log(`usage-server :${PORT}`));
+}
+
+// Speso API Anthropic appeso all'account Claude che lo possiede
+// (apiOut.label, da USAGE_API_ACCOUNT): la tray lo disegna lì sotto, niente sezione hub.
+// Riga come il bonus cloud: barra = speso/concesso, detail = saldo
+// ("$X rimasti"), resetsAt = SCADENZA del credito (la tray scrive "scade
+// gg/mm", niente ↻). Speso, concesso e ora di lettura vanno in note (tooltip).
+export function attachApiSpend(providers, apiOut) {
+  if (!apiOut || apiOut.error) return providers;
+  if (apiOut.live) {
+    const { spent, remaining, granted, expiresAt, asOf } = apiOut.live;
+    const claude = (providers ?? []).find((p) => p?.id === "claude");
+    const mine = claude?.accounts?.find((a) => a?.label === apiOut.label);
+    if (mine) {
+      const usedPct = granted > 0 ? Math.round((spent / granted) * 100) : 0;
+      const resetsAt = toEpoch(expiresAt);
+      const time = new Date(asOf * 1000).toLocaleTimeString("it-IT",
+        { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit" });
+      mine.apiSpend = { key: "API", usedPct, resetsAt, resetText: "",
+        status: statusFor(usedPct, null),
+        detail: `$${remaining.toFixed(2)} rimasti`,
+        note: `$${spent.toFixed(2)} spesi su $${granted.toFixed(2)} · letto alle ${time}` };
+    }
+    return providers;
+  }
+  if (apiOut.snapshot) {
+    const snapshot = apiOut.snapshot;
+    const claude = (providers ?? []).find((p) => p?.id === "claude");
+    const mine = claude?.accounts?.find((a) => a?.label === apiOut.label);
+    if (mine) {
+      const dm = (d) => d.toLocaleDateString("it-IT", { timeZone: "Europe/Rome", day: "2-digit", month: "2-digit" });
+      const observed = new Date(snapshot.asOf * 1000);
+      const date = dm(observed);
+      const time = observed.toLocaleTimeString("it-IT", { timeZone: "Europe/Rome", hour: "2-digit", minute: "2-digit" });
+      const expires = toEpoch(snapshot.expiresAt);
+      // Lettura a mano: niente rapporto (status unknown → "—"), la data di
+      // lettura resta in vista perché il saldo può essere vecchio.
+      mine.apiSpend = { key: "API", usedPct: 0, resetsAt: null, resetText: "", status: "unknown",
+        detail: `$${snapshot.remaining.toFixed(2)} rilevati ${date}`,
+        note: `saldo letto a mano ${date} ${time} · solo API/SDK`
+          + (expires ? ` · scade ${dm(new Date(expires * 1000))}` : "") };
+    }
+    return providers;
+  }
+  const shaped = mapHub("anthropic-api", "Anthropic API", apiOut);
+  if (shaped.error || !shaped.accounts?.[0]?.quotas?.[0]) return providers;
+  const claude = (providers ?? []).find((p) => p?.id === "claude");
+  const mine = claude?.accounts?.find((a) => apiOut.label && a?.label === apiOut.label);
+  if (mine) mine.apiSpend = shaped.accounts[0].quotas[0];
+  return providers;
 }
 
 export { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, toEpoch, overview, code3 };

@@ -23,11 +23,11 @@ struct CloudCredit: Codable {
     let reason: String?
 }
 
-// Età di un saldo stantio: "5m fa", "2h fa". Mai il futuro (orologi storti).
-func staleAge(_ asOf: Int) -> String {
-    let mins = max(0, Int(Date().timeIntervalSince1970) - asOf) / 60
-    if mins < 60 { return "\(mins)m fa" }
-    return "\(mins / 60)h fa"
+// Età di un dato stantio: "dato di 5m fa", "dato di 2h fa" (stessa dicitura
+// del dato vecchio di Muse lato server). Mai il futuro (orologi storti).
+func staleAge(_ asOf: Int, now: Date = Date()) -> String {
+    let mins = max(0, Int(now.timeIntervalSince1970) - asOf) / 60
+    return mins < 60 ? "dato di \(mins)m fa" : "dato di \(mins / 60)h fa"
 }
 
 struct Provider: Codable {
@@ -46,6 +46,23 @@ struct Account: Codable {
     let active: Bool
     let status: String
     let quotas: [Quota]
+    // Reset manuali disponibili: nil = ignoti (Claude, promo senza API),
+    // mai zero inventato. Il server vecchio non la manda: resta nil.
+    let resetCredits: ResetCredits?
+    // Speso API Anthropic dell'org di questo account (solo guedado):
+    // riga a consumo sotto le quote, mai in barra. Nil = sonda giù.
+    let apiSpend: Quota?
+}
+
+// available fa fede (la lista può essere cappata); solo gli available.
+struct ResetCredits: Codable {
+    let available: Int
+    let credits: [ResetCredit]?
+}
+
+struct ResetCredit: Codable {
+    let title: String?
+    let expiresAt: Int?
 }
 
 struct Quota: Codable {
@@ -55,6 +72,9 @@ struct Quota: Codable {
     let resetText: String
     let status: String
     let detail: String?
+    // Testo lungo per il tooltip (es. credito API: speso su concesso e ora
+    // di lettura). Il server vecchio non la manda: resta nil.
+    let note: String?
 }
 
 struct Renewal: Codable {
@@ -157,10 +177,18 @@ class UsageBarView: NSView {
         return t + "…"
     }
 
+    // Badge testata: " ↻N" solo con reset manuali disponibili. Zero o
+    // ignoti (Claude) = niente: la barra resta pulita, il menu dice tutto.
+    private func resetBadge(_ a: Account) -> String {
+        let n = a.resetCredits?.available ?? 0
+        return n > 0 ? " ↻\(n)" : ""
+    }
+
     // Un solo passaggio di layout per misura e disegno: niente derive tra i due.
     private struct AcctFrame {
         let acct: Account
         let header: String
+        let badge: String
         let x: CGFloat
         let w: CGFloat
     }
@@ -182,13 +210,17 @@ class UsageBarView: NSView {
             var frames: [AcctFrame] = []
             for a in accs {
                 // larghezza = riga quota più larga; la mail si taglia a misura,
-                // mai oltre. Le righe non si tagliano mai.
+                // mai oltre. Le righe non si tagliano mai. Il badge non si taglia:
+                // ruba spazio alla mail, non alle righe.
+                let badge = resetBadge(a)
+                let badgeW = (badge as NSString).size(withAttributes: [.font: headerFont]).width
                 let qw = a.quotas.prefix(2).map { quotaWidth($0) }.max() ?? 0
-                let header = cropEmail(a.label, cap: max(30, qw - iconIndent))
+                let header = cropEmail(a.label, cap: max(30, qw - iconIndent - badgeW))
                 let hw = iconIndent
                     + (header as NSString).size(withAttributes: [.font: headerFont]).width
+                    + badgeW
                 let cw = max(hw, qw)
-                frames.append(AcctFrame(acct: a, header: header, x: x, w: cw))
+                frames.append(AcctFrame(acct: a, header: header, badge: badge, x: x, w: cw))
                 x += cw + acctGap
             }
             x -= acctGap
@@ -229,6 +261,11 @@ class UsageBarView: NSView {
                     .draw(in: NSRect(x: f.x - 1, y: iconY, width: iconSize, height: iconSize))
                 drawBaseline(f.header, x: f.x + iconIndent, baseline: headerBaseline,
                              font: headerFont, color: white, shadow: true)
+                if !f.badge.isEmpty {
+                    let hw = (f.header as NSString).size(withAttributes: [.font: headerFont]).width
+                    drawBaseline(f.badge, x: f.x + iconIndent + hw, baseline: headerBaseline,
+                                 font: headerFont, color: white, shadow: true)
+                }
                 // due righe quota: 5H sopra, 7D sotto (o una sola se unica).
                 // Partono a x0 come l'icona: niente gutter dedicato.
                 let rows = a.quotas.prefix(2)
@@ -278,6 +315,126 @@ private extension Int {
 
 private let menuW: CGFloat = 440
 
+// Griglia unica del menu: ogni riga sotto un account usa queste colonne,
+// così tag, barre, % e testi cadono sulla stessa x in tutto il menu.
+//   lead │ TAG (46) │ barra (barW) │ % (38, a destra) │ dettaglio (170)
+// Le x si ricavano l'una dall'altra, non si scrivono a mano: una sola
+// larghezza di barra per quote, API, bonus e hub. Larghezze misurate coi
+// font qui sotto (+ ~4pt di padding di NSTextField): "BONUS" 40.3,
+// "100%" 32.9, dettaglio più lungo "€109.89/mese · rinnova 06/11" 153.
+enum MenuGrid {
+    static let lead: CGFloat = 38                       // = email account e nome sezione
+    static let tagW: CGFloat = 46
+    static let barX: CGFloat = lead + tagW + 4          // 88
+    static let right: CGFloat = menuW - 16              // 424
+    static let detailW: CGFloat = 170
+    static let detailX: CGFloat = right - detailW       // 254
+    static let pctW: CGFloat = 38
+    static let pctX: CGFloat = detailX - 8 - pctW       // 208
+    static let barW: CGFloat = pctX - 4 - barX          // 116
+    static let barH: CGFloat = 8
+    static let rowH: CGFloat = 22
+    static let textY: CGFloat = 3
+    static let textH: CGFloat = 16
+    static let tagFont = NSFont.systemFont(ofSize: 11, weight: .semibold)
+    // cifre tabulari: "79%" e "100%" finiscono sullo stesso bordo
+    static let pctFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold)
+    static let detailFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
+    static let labelFont = NSFont.systemFont(ofSize: 10.5)
+}
+
+// Soglie identiche a statusFor() del server: un colore, un significato.
+func usageStatus(_ pct: Int) -> String {
+    if pct >= 100 { return "depleted" }
+    if pct >= 95 { return "critical" }
+    if pct >= 80 { return "warning" }
+    return "ok"
+}
+
+// Rapporto → percentuale intera, limitata: un tetto minuscolo non deve
+// mandare in overflow Int() (crash), la % resta comunque "oltre 100".
+func pctInt(_ ratio: Double) -> Int {
+    Int(min(9999, max(-9999, (ratio * 100).rounded())))
+}
+
+// Soldi col segno prima del simbolo: "-$12.50", mai "$-12.50" (né "-$0.00").
+func money(_ v: Double, decimals: Int = 2) -> String {
+    let s = String(format: "$%.\(decimals)f", abs(v))
+    let zero = String(format: "$%.\(decimals)f", 0.0)
+    return v < 0 && s != zero ? "-" + s : s
+}
+
+private func gridLabel(_ text: String, x: CGFloat, w: CGFloat, font: NSFont,
+                       color: NSColor, align: NSTextAlignment = .left) -> NSTextField {
+    let l = NSTextField(labelWithString: text)
+    l.font = font
+    l.textColor = color
+    l.alignment = align
+    l.lineBreakMode = .byTruncatingTail
+    l.frame = NSRect(x: x, y: MenuGrid.textY, width: w, height: MenuGrid.textH)
+    return l
+}
+
+// Riga metrica: TAG · barra · % · dettaglio. Tutte le barre del menu passano
+// da qui (quote, API, bonus, hub): stessa x, stessa larghezza. Barra e %
+// dicono sempre il CONSUMATO: piena e rossa = finito, ovunque.
+// ratio nil = rapporto ignoto (niente tetto, saldo assente): niente barra
+// e "—", mai uno 0% inventato. Solo viste layer-backed, niente draw custom:
+// si renderizza anche offscreen (--snapshot).
+func metricRow(tag: String, ratio: Double?, status: String, detail: String,
+               detailColor: NSColor = .secondaryLabelColor, tooltip: String? = nil) -> NSMenuItem {
+    let g = MenuGrid.self
+    let ratio = ratio.flatMap { $0.isFinite ? $0 : nil }
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: g.rowH))
+    view.addSubview(gridLabel(tag, x: g.lead, w: g.tagW, font: g.tagFont, color: .labelColor))
+    if let r = ratio {
+        let track = NSView(frame: NSRect(x: g.barX, y: (g.rowH - g.barH) / 2,
+                                         width: g.barW, height: g.barH))
+        track.wantsLayer = true
+        track.layer?.cornerRadius = g.barH / 2
+        track.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+        // oltre il 100% la barra resta piena: il numero vero lo dice la %
+        let fw = (g.barW * CGFloat(min(1, max(0, r)))).rounded()
+        if fw >= 1 {
+            // mai più stretto che alto: un consumo minimo resta un pallino
+            let fill = NSView(frame: NSRect(x: 0, y: 0, width: max(fw, g.barH), height: g.barH))
+            fill.wantsLayer = true
+            fill.layer?.cornerRadius = g.barH / 2
+            fill.layer?.backgroundColor = statusColor(status).cgColor
+            track.addSubview(fill)
+        }
+        view.addSubview(track)
+    }
+    // % nel colore di stato quando c'è un problema, come nella barra
+    let pctText = ratio.map { "\(pctInt($0))%" } ?? "—"
+    let pctColor: NSColor = ratio == nil ? .tertiaryLabelColor
+        : status == "ok" ? .labelColor : statusColor(status)
+    view.addSubview(gridLabel(pctText, x: g.pctX, w: g.pctW, font: g.pctFont,
+                              color: pctColor, align: .right))
+    view.addSubview(gridLabel(detail, x: g.detailX, w: g.detailW, font: g.detailFont,
+                              color: detailColor))
+    let item = NSMenuItem()
+    item.view = view
+    item.toolTip = tooltip
+    return item
+}
+
+// Riga di testo (abbonamento, reset manuali, buchi): etichetta sotto
+// TAG + barra, valore nella STESSA colonna dettaglio delle righe metriche.
+func textRow(_ label: String, detail: String, labelColor: NSColor = .secondaryLabelColor,
+             detailColor: NSColor = .secondaryLabelColor, tooltip: String? = nil) -> NSMenuItem {
+    let g = MenuGrid.self
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: g.rowH))
+    view.addSubview(gridLabel(label, x: g.lead, w: g.detailX - 8 - g.lead, font: g.labelFont,
+                              color: labelColor))
+    view.addSubview(gridLabel(detail, x: g.detailX, w: g.detailW, font: g.detailFont,
+                              color: detailColor))
+    let item = NSMenuItem()
+    item.view = view
+    item.toolTip = tooltip
+    return item
+}
+
 func headerRow(_ text: String) -> NSMenuItem {
     let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 20))
     let label = NSTextField(labelWithString: text)
@@ -302,7 +459,7 @@ func sectionRow(_ text: String, providerId: String?) -> NSMenuItem {
     let label = NSTextField(labelWithString: text)
     label.font = .systemFont(ofSize: 12, weight: .semibold)
     label.textColor = .labelColor
-    label.frame = NSRect(x: 38, y: 4, width: menuW - 54, height: 18)
+    label.frame = NSRect(x: MenuGrid.lead, y: 4, width: MenuGrid.right - MenuGrid.lead, height: 18)
     view.addSubview(label)
     let item = NSMenuItem()
     item.view = view
@@ -317,9 +474,12 @@ func dayMonth(_ iso: String) -> String {
     return String(format: "%02d/%02d", d, m)
 }
 
+// Account: pallino di stato + email su tutta la riga. Niente riepilogo a
+// destra: era il doppione della riga quota peggiore subito sotto, e fuori
+// griglia (allineato a destra, formato suo).
 func accountRow(_ a: Account) -> NSMenuItem {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 28))
-    let dot = NSView(frame: NSRect(x: 19, y: 10, width: 8, height: 8))
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 26))
+    let dot = NSView(frame: NSRect(x: 19, y: 9, width: 8, height: 8))
     dot.wantsLayer = true
     dot.layer?.cornerRadius = 4
     dot.layer?.backgroundColor = statusColor(a.status).cgColor
@@ -327,104 +487,58 @@ func accountRow(_ a: Account) -> NSMenuItem {
     let label = NSTextField(labelWithString: a.label)
     label.font = .systemFont(ofSize: 12, weight: a.active ? .semibold : .regular)
     label.textColor = .labelColor
-    label.frame = NSRect(x: 38, y: 5, width: 200, height: 18)
+    label.frame = NSRect(x: MenuGrid.lead, y: 4, width: MenuGrid.right - MenuGrid.lead, height: 18)
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
-    // a destra la quota peggiore: il colpo d'occhio che conta
-    if let worst = a.quotas.max(by: { $0.usedPct < $1.usedPct }) {
-        let right = NSTextField(labelWithString: "\(worst.key.uppercased()) \(worst.usedPct)% · ↻ \(worst.resetText)")
-        right.font = .systemFont(ofSize: 11)
-        right.textColor = .secondaryLabelColor
-        right.alignment = .right
-        right.frame = NSRect(x: 244, y: 6, width: menuW - 260, height: 16)
-        view.addSubview(right)
-    }
     let item = NSMenuItem()
     item.view = view
     item.toolTip = a.id
     return item
 }
 
-// Riga quota: tag finestra + barra di progresso + % + tempo residuo.
-// Solo viste layer-backed, niente draw custom: si renderizza anche offscreen.
+// Riga quota (5H/7D): ↻ solo davanti a un tempo di reset vero; il dato
+// vecchio (Muse: "dato di 48m fa") resta senza freccia, in grigio.
 func quotaBarRow(_ q: Quota) -> NSMenuItem {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 24))
-    let key = NSTextField(labelWithString: q.key.uppercased())
-    key.font = .systemFont(ofSize: 11, weight: .semibold)
-    key.textColor = .labelColor
-    key.frame = NSRect(x: 38, y: 4, width: 26, height: 16)
-    view.addSubview(key)
-    let barX: CGFloat = 68
-    let barW: CGFloat = 170
-    let track = NSView(frame: NSRect(x: barX, y: 8, width: barW, height: 9))
-    track.wantsLayer = true
-    track.layer?.cornerRadius = 4.5
-    track.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.12).cgColor
-    let fw = barW * CGFloat(min(100, max(0, q.usedPct))) / 100
-    if fw > 1 {
-        let fill = NSView(frame: NSRect(x: 0, y: 0, width: fw, height: 9))
-        fill.wantsLayer = true
-        fill.layer?.cornerRadius = 4.5
-        fill.layer?.backgroundColor = statusColor(q.status).cgColor
-        track.addSubview(fill)
-    }
-    view.addSubview(track)
-    let pct = NSTextField(labelWithString: "\(q.usedPct)%")
-    pct.font = .systemFont(ofSize: 11, weight: .semibold)
-    pct.textColor = q.status == "ok" ? .labelColor : statusColor(q.status)
-    pct.alignment = .right
-    pct.frame = NSRect(x: 242, y: 4, width: 38, height: 16)
-    view.addSubview(pct)
-    let time = NSTextField(labelWithString: "↻ \(q.resetText)")
-    time.font = .systemFont(ofSize: 11)
-    time.textColor = .secondaryLabelColor
-    time.frame = NSRect(x: 286, y: 4, width: menuW - 302, height: 16)
-    view.addSubview(time)
-    let item = NSMenuItem()
-    item.view = view
-    return item
+    let stale = q.status == "stale"
+    let detail = q.resetText.isEmpty ? "" : stale ? q.resetText : "↻ \(q.resetText)"
+    return metricRow(tag: q.key.uppercased(), ratio: Double(q.usedPct) / 100,
+                     status: q.status, detail: detail,
+                     detailColor: stale ? .tertiaryLabelColor : .secondaryLabelColor)
 }
 
-// Riga hub (a consumo): tag + numeri assoluti, niente barra. Il numero
-// ("$1.05 su $50") è il dato; la % vive nel tooltip.
+// Credito API (promo Anthropic): barra = speso su concesso, come il bonus.
+// Il server manda il saldo ("$X rimasti"), la tray aggiunge la scadenza da
+// resetsAt: è una scadenza, non un reset, quindi niente ↻. Speso, concesso
+// e ora di lettura nel tooltip (note).
+func apiBarRow(_ q: Quota) -> NSMenuItem {
+    var detail = q.detail ?? ""
+    if let at = q.resetsAt {
+        detail += (detail.isEmpty ? "" : " · ") + "scade \(dayMonthEpoch(at))"
+    }
+    return metricRow(tag: "API", ratio: q.status == "unknown" ? nil : Double(q.usedPct) / 100,
+                     status: q.status, detail: detail,
+                     tooltip: q.note.map { "Credito API Anthropic: \($0)" })
+}
+
+// Riga hub (a consumo): stessa griglia, barra solo con un tetto vero
+// (status "unknown" = spesa senza tetto: niente barra e "—").
 func hubQuotaRow(_ q: Quota) -> NSMenuItem {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
-    let key = NSTextField(labelWithString: q.key.uppercased())
-    key.font = .systemFont(ofSize: 11, weight: .semibold)
-    key.textColor = .labelColor
-    key.frame = NSRect(x: 38, y: 3, width: 34, height: 16)
-    view.addSubview(key)
-    var right = q.detail ?? "\(q.usedPct)%"
-    if !q.resetText.isEmpty { right += " · ↻ \(q.resetText)" }
-    let val = NSTextField(labelWithString: right)
-    val.font = .systemFont(ofSize: 10.5)
-    val.textColor = q.status == "ok" ? .labelColor : statusColor(q.status)
-    val.frame = NSRect(x: 76, y: 3, width: menuW - 92, height: 16)
-    view.addSubview(val)
-    let item = NSMenuItem()
-    item.view = view
-    return item
+    var detail = q.detail ?? ""
+    if !q.resetText.isEmpty { detail += (detail.isEmpty ? "" : " · ") + "↻ \(q.resetText)" }
+    return metricRow(tag: q.key.uppercased(),
+                     ratio: q.status == "unknown" ? nil : Double(q.usedPct) / 100,
+                     status: q.status, detail: detail, tooltip: q.note)
 }
 
-// Riga Abbonamento: costo, non saldo. Il prefisso la distingue dalla riga
-// Bonus cloud a colpo d'occhio; la destra resta tenue come prima.
-func subscriptionRow(_ r: Renewal, providerName: String = "", accountLabels: Set<String> = []) -> NSMenuItem {
-    // Sotto l'header del provider non ripetere né il suo nome né gli account già elencati sopra.
-    var service = r.service
-    if !providerName.isEmpty, service.lowercased().hasPrefix(providerName.lowercased() + " ") {
-        service = String(service.dropFirst(providerName.count + 1))
-    }
-    var text = "Abbonamento \(service)"
+// Riga Abbonamento: costo, non saldo. Nome del servizio intero ("Muse Code",
+// non "Code"): niente prefissi tolti, si legge uguale sotto ogni provider.
+// Il dettaglio resta tenue: è un promemoria, non un consumo.
+func subscriptionRow(_ r: Renewal, accountLabels: Set<String> = []) -> NSMenuItem {
+    // Gli account già elencati sopra non si ripetono.
+    var text = "Abbonamento \(r.service)"
     if !r.account.isEmpty, r.account != r.service, !accountLabels.contains(r.account) {
         text += " — \(r.account)"
     }
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
-    let label = NSTextField(labelWithString: text)
-    label.font = .systemFont(ofSize: 10.5)
-    label.textColor = .secondaryLabelColor
-    label.frame = NSRect(x: 38, y: 4, width: 150, height: 15)
-    label.lineBreakMode = .byTruncatingTail
-    view.addSubview(label)
     let detail: String
     switch r.cycle {
     case "mensile":
@@ -441,78 +555,89 @@ func subscriptionRow(_ r: Renewal, providerName: String = "", accountLabels: Set
         detail = [r.amount, r.renewsAt.map { "↻ \(dayMonth($0))" } ?? "", r.cycle]
             .filter { !$0.isEmpty }.joined(separator: " · ")
     }
-    let right = NSTextField(labelWithString: detail)
-    right.font = .systemFont(ofSize: 10.5)
-    right.textColor = .tertiaryLabelColor
-    right.alignment = .right
-    right.frame = NSRect(x: 192, y: 4, width: menuW - 208, height: 15)
-    view.addSubview(right)
-    let item = NSMenuItem()
-    item.view = view
-    item.toolTip = r.note.isEmpty ? nil : r.note
-    return item
+    return textRow(text, detail: detail, detailColor: .tertiaryLabelColor,
+                   tooltip: r.note.isEmpty ? nil : r.note)
+}
+
+// Epoch → "gg/mm" per le scadenze dei reset (dayMonth vuole ISO).
+func dayMonthEpoch(_ epoch: Int) -> String {
+    let f = DateFormatter()
+    f.dateFormat = "dd/MM"
+    return f.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
+}
+
+// Riga reset manuali: conteggio noto (anche zero), mai se ignoto
+// (Claude: promo senza API → niente riga). Scadenza del primo disponibile.
+func resetCreditRow(_ rc: ResetCredits) -> NSMenuItem {
+    if rc.available == 0 {
+        return textRow("Reset manuali", detail: "nessuno rimasto", detailColor: .tertiaryLabelColor)
+    }
+    let detail = "\(rc.available) disponibil" + (rc.available == 1 ? "e" : "i")
+        + ((rc.credits ?? []).compactMap { $0.expiresAt }.min()
+            .map { " · scade \(dayMonthEpoch($0))" } ?? "")
+    return textRow("Reset manuali", detail: detail,
+                   tooltip: (rc.credits ?? []).compactMap { $0.title }.first)
 }
 
 // Account live senza voce in renewals.json: il buco si vede, in grigio.
 func unregisteredRow() -> NSMenuItem {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
-    let label = NSTextField(labelWithString: "Abbonamento")
-    label.font = .systemFont(ofSize: 10.5)
-    label.textColor = .tertiaryLabelColor
-    label.frame = NSRect(x: 38, y: 4, width: 150, height: 15)
-    view.addSubview(label)
-    let right = NSTextField(labelWithString: "non registrato")
-    right.font = .systemFont(ofSize: 10.5)
-    right.textColor = .tertiaryLabelColor
-    right.alignment = .right
-    right.frame = NSRect(x: 192, y: 4, width: menuW - 208, height: 15)
-    view.addSubview(right)
-    let item = NSMenuItem()
-    item.view = view
-    return item
+    textRow("Abbonamento", detail: "non registrato",
+            labelColor: .tertiaryLabelColor, detailColor: .tertiaryLabelColor)
 }
 
-// Riga del bonus cloud: saldo ("rimasti su"), mai costo. La destra è verde
-// attenuato contro il grigio tenue dell'abbonamento: non si confondono.
-// Senza saldo (throttle 429) la riga resta e dice che aggiorna: sparire
-// e riapparire confonde più di un'attesa dichiarata.
-func creditRow(_ c: CloudCredit, email: String? = nil) -> NSMenuItem {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 22))
-    var title = "Bonus cloud"
-    if let email = email, !email.isEmpty { title += " — \(email)" }
-    let label = NSTextField(labelWithString: title)
-    label.font = .systemFont(ofSize: 10.5)
-    label.textColor = .secondaryLabelColor
-    label.frame = NSRect(x: 38, y: 4, width: 150, height: 15)
-    label.lineBreakMode = .byTruncatingTail
-    view.addSubview(label)
-    let detail: String
-    var valueColor: NSColor = .tertiaryLabelColor
-    if let left = c.remaining {
-        var parts = [String(format: "$%.2f rimasti", left)
-            + (c.limit.map { String(format: " su $%.0f", $0) } ?? "")]
-        if let r = c.renewsAt { parts.append("scade \(dayMonth(r))") }
-        if c.stale == true, let at = c.asOf { parts.append(staleAge(at)) }
-        detail = parts.joined(separator: " · ")
-        if let lim = c.limit, lim > 0, left < lim * 0.2 {
-            valueColor = .systemRed
-        } else {
-            valueColor = .systemGreen.withAlphaComponent(0.8)
-        }
-    } else if c.reason == "token" {
-        detail = "token scaduto · apri Claude Code"
-    } else {
-        detail = "in aggiornamento…"
+// Oltre questa età il saldo bonus si dichiara vecchio. Sotto è rumore: il
+// server marca stale anche un dato di 5' (sonda in cache FRESH 15' + poll),
+// quindi la soglia sta appena sopra un giro di aggiornamento saltato.
+let creditStaleS = 1200
+
+// ISO "2026-11-05" → fine di quel giorno (ora locale): scaduto solo dopo.
+func endOfDay(_ iso: String) -> Date? {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd"
+    guard let d = f.date(from: iso) else { return nil }
+    return Calendar.current.date(byAdding: .day, value: 1, to: d)
+}
+
+// Bonus cloud: riga metrica come le quote. Barra e % = usato su concesso
+// (stesso verso di 5H/7D e API), dettaglio = saldo rimasto + scadenza; il
+// resto nel tooltip. Senza saldo (429, token) la riga resta e dice perché:
+// sparire e riapparire confonde più di un'attesa dichiarata.
+func creditRow(_ c: CloudCredit, now: Date = Date()) -> NSMenuItem {
+    guard let left = c.remaining else {
+        let token = c.reason == "token"
+        return metricRow(tag: "BONUS", ratio: nil, status: "unknown",
+                         detail: token ? "token scaduto" : "in aggiornamento…",
+                         detailColor: .tertiaryLabelColor,
+                         tooltip: token ? "Bonus cloud Max: apri Claude Code per rinnovare il token"
+                                        : "Bonus cloud Max: saldo in aggiornamento")
     }
-    let right = NSTextField(labelWithString: detail)
-    right.textColor = valueColor
-    right.font = .systemFont(ofSize: 10.5)
-    right.alignment = .right
-    right.frame = NSRect(x: 192, y: 4, width: menuW - 208, height: 15)
-    view.addSubview(right)
-    let item = NSMenuItem()
-    item.view = view
-    return item
+    // Senza tetto noto niente rapporto: il saldo sì, una barra finta no.
+    let limit = c.limit.flatMap { $0 > 0 ? $0 : nil }
+    let used = c.used ?? limit.map { $0 - left }
+    let ratio = limit.flatMap { l in used.map { $0 / l } }
+    let nowS = Int(now.timeIntervalSince1970)
+    let old = c.stale == true && (c.asOf.map { nowS - $0 >= creditStaleS } ?? false)
+    let expired = c.renewsAt.flatMap(endOfDay).map { $0 <= now } ?? false
+    // scaduto o vecchio: grigio come il dato vecchio di Muse, mai verde
+    let status = expired ? "off" : old ? "stale"
+        : ratio.map { usageStatus(pctInt($0)) } ?? "unknown"
+    var detail = "\(money(left)) rimasti"
+    if expired, let r = c.renewsAt {
+        detail = "\(money(left)) · scaduto \(dayMonth(r))"
+    } else if old, let at = c.asOf {
+        detail += " · \(staleAge(at, now: now))"
+    } else if let r = c.renewsAt {
+        detail += " · scade \(dayMonth(r))"
+    }
+    var tip = "Bonus cloud Max: \(money(left)) rimasti"
+    if let l = limit { tip += " su \(money(l, decimals: 0))" }
+    if let u = used { tip += " · usati \(money(u))" }
+    if let r = c.renewsAt { tip += (expired ? " · scaduto " : " · scade ") + dayMonth(r) }
+    if let at = c.asOf { tip += " · \(staleAge(at, now: now))" }
+    return metricRow(tag: "BONUS", ratio: ratio, status: status, detail: detail,
+                     detailColor: expired || old ? .tertiaryLabelColor : .secondaryLabelColor,
+                     tooltip: tip)
 }
 
 func emailRow(_ email: String) -> NSMenuItem {
@@ -521,7 +646,7 @@ func emailRow(_ email: String) -> NSMenuItem {
     let label = NSTextField(labelWithString: email)
     label.font = .systemFont(ofSize: 11)
     label.textColor = .secondaryLabelColor
-    label.frame = NSRect(x: 38, y: 3, width: menuW - 54, height: 16)
+    label.frame = NSRect(x: MenuGrid.lead, y: 3, width: MenuGrid.right - MenuGrid.lead, height: 16)
     label.lineBreakMode = .byTruncatingTail
     view.addSubview(label)
     let item = NSMenuItem()
@@ -532,7 +657,7 @@ func emailRow(_ email: String) -> NSMenuItem {
 // Rinnovi raggruppati per email con la sua intestazione; le righe
 // auto-nominate (service == account) restano da sole senza intestazione.
 // Qui tray:false resta nascosto: sotto gli account live si usa comunque.
-func addGroupedRenewals(_ rows: [Renewal], providerName: String, baseLabels: Set<String>,
+func addGroupedRenewals(_ rows: [Renewal], baseLabels: Set<String>,
                         menu: NSMenu, shown: inout Set<String>) {
     let rows = rows.filter { $0.tray != false }
     var keys: [String] = []
@@ -543,14 +668,13 @@ func addGroupedRenewals(_ rows: [Renewal], providerName: String, baseLabels: Set
         let rs = rows.filter { $0.account == k && !shown.contains($0.service + "|" + $0.account) }
         if rs.allSatisfy({ $0.service == $0.account }) {
             for r in rs {
-                menu.addItem(subscriptionRow(r, providerName: providerName, accountLabels: baseLabels))
+                menu.addItem(subscriptionRow(r, accountLabels: baseLabels))
                 shown.insert(r.service + "|" + r.account)
             }
         } else {
             menu.addItem(emailRow(k))
             for r in rs {
-                menu.addItem(subscriptionRow(r, providerName: providerName,
-                                              accountLabels: baseLabels.union([k])))
+                menu.addItem(subscriptionRow(r, accountLabels: baseLabels.union([k])))
                 shown.insert(r.service + "|" + r.account)
             }
         }
@@ -569,12 +693,14 @@ func legendRow(_ text: String) -> NSMenuItem {
     return item
 }
 
-func infoRow(_ text: String) -> NSMenuItem {
-    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 28))
+// x = 16 per i messaggi del menu intero (offline); x = lead sotto una
+// sezione provider, allineato agli account che sostituisce.
+func infoRow(_ text: String, x: CGFloat = 16) -> NSMenuItem {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: 24))
     let label = NSTextField(labelWithString: text)
     label.font = .systemFont(ofSize: 11)
     label.textColor = .secondaryLabelColor
-    label.frame = NSRect(x: 16, y: 5, width: menuW - 32, height: 18)
+    label.frame = NSRect(x: x, y: 4, width: menuW - 16 - x, height: 16)
     view.addSubview(label)
     let item = NSMenuItem()
     item.view = view
@@ -593,15 +719,34 @@ func creditMap(_ snapshot: Overview?) -> [String: CloudCredit] {
     return [:]
 }
 
+// Preferenze della tray (persistenti): quale fascia e quale extra mostrare.
+enum TrayPrefs {
+    static let d = UserDefaults.standard
+    static var showDaily: Bool {
+        get { d.object(forKey: "showDaily") as? Bool ?? true }
+        set { d.set(newValue, forKey: "showDaily") }
+    }
+    static var showApi: Bool {
+        get { d.object(forKey: "showApi") as? Bool ?? true }
+        set { d.set(newValue, forKey: "showApi") }
+    }
+    static var showBonus: Bool {
+        get { d.object(forKey: "showBonus") as? Bool ?? true }
+        set { d.set(newValue, forKey: "showBonus") }
+    }
+}
+
 func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -> NSMenu {
     let menu = NSMenu()
     menu.autoenablesItems = false
-    menu.addItem(headerRow("Usage"))
+    menu.addItem(headerRow("Consumi"))
     if isOffline {
-        menu.addItem(infoRow("⚡ Offline — cannot reach usage-server :3337"))
+        menu.addItem(infoRow("⚡ Offline — usage-server :3337 non raggiungibile"))
     } else {
         menu.addItem(legendRow("Nella barra: 5H sopra, 7D sotto · % e tempo di reset per quota"))
         menu.addItem(legendRow("Account affievolito: non attivo · ↻: reset o rinnovo"))
+        menu.addItem(legendRow("↻N in testata: reset manuali disponibili"))
+        menu.addItem(legendRow("Nel menu: barra e % = consumato · a destra reset, saldo o scadenza"))
         let providers = snapshot?.providers ?? []
         let renewals = snapshot?.renewals ?? []
         let cmap = creditMap(snapshot)
@@ -610,10 +755,11 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
         for p in providers {
             menu.addItem(sectionRow(p.name, providerId: p.id))
             let accs = p.accounts ?? []
+            // Sotto la sezione il nome del provider non si ripete.
             if let err = p.error {
-                menu.addItem(infoRow("\(p.name): \(err)"))
+                menu.addItem(infoRow(err, x: MenuGrid.lead))
             } else if accs.isEmpty {
-                menu.addItem(infoRow("nessun account"))
+                menu.addItem(infoRow("nessun account", x: MenuGrid.lead))
             }
             let labels = Set(accs.map { $0.label })
             // Claude: solo i rinnovi degli account live vdm; gli altri
@@ -624,13 +770,24 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
             for a in accs {
                 menu.addItem(accountRow(a))
                 for q in a.quotas {
+                    if q.key.lowercased() == "5h", !TrayPrefs.showDaily { continue }
                     menu.addItem(p.billing == "usage" ? hubQuotaRow(q) : quotaBarRow(q))
+                }
+                // Speso API sotto le quote del SUO account (solo guedado):
+                // è a consumo come l'hub, ma raggruppato qui e non in sezione.
+                if TrayPrefs.showApi, let api = a.apiSpend {
+                    menu.addItem(apiBarRow(api))
+                }
+                // Reset manuali sotto le quote (è roba di quote): solo se noti,
+                // Codex li dà, Claude no (promo senza API → niente riga).
+                if let rc = a.resetCredits {
+                    menu.addItem(resetCreditRow(rc))
                 }
                 // Bonus cloud sotto il SUO account Claude (è un benefit Max:
                 // sotto codex/muse si triplicherebbe, stessa email). Se Claude
                 // è offline la voce cade nel ripiego Credito AI. nobonus: niente riga.
                 if p.id == "claude", let c = cmap[a.label], c.nobonus != true {
-                    menu.addItem(creditRow(c))
+                    if TrayPrefs.showBonus { menu.addItem(creditRow(c)) }
                     bonusShown.insert(a.label)
                 }
                 // Abbonamento sotto ogni account: la voce di renewals.json
@@ -642,7 +799,7 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
                         menu.addItem(unregisteredRow())
                     } else {
                         for r in mine {
-                            menu.addItem(subscriptionRow(r, providerName: p.name, accountLabels: labels))
+                            menu.addItem(subscriptionRow(r, accountLabels: labels))
                             shown.insert(r.service + "|" + r.account)
                         }
                     }
@@ -650,8 +807,7 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
             }
             // Email solo-fattura: gruppo proprio con la sua intestazione,
             // mai sotto l'account di un altro.
-            addGroupedRenewals(pren, providerName: p.name, baseLabels: labels,
-                               menu: menu, shown: &shown)
+            addGroupedRenewals(pren, baseLabels: labels, menu: menu, shown: &shown)
         }
         let orphans = renewals.filter {
             $0.tray != false && !shown.contains($0.service + "|" + $0.account)
@@ -659,32 +815,44 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
         if !orphans.isEmpty {
             menu.addItem(sectionRow("Altri abbonamenti (fuori rotazione)", providerId: nil))
             // Stesso raggruppamento per email, senza trattini né righe piatte.
-            addGroupedRenewals(orphans, providerName: "", baseLabels: [],
-                               menu: menu, shown: &shown)
+            addGroupedRenewals(orphans, baseLabels: [], menu: menu, shown: &shown)
         }
         // Ripiego: bonus di account fuori lista (rotazione vdm) o server
-        // vecchio. Solo allora la sezione a parte, che non duplica niente.
+        // vecchio. Solo allora la sezione a parte, che non duplica niente:
+        // email come intestazione, sotto la stessa riga BONUS degli account.
         let spare = cmap.filter { !bonusShown.contains($0.key) && $0.value.nobonus != true }
-        if !spare.isEmpty {
+        if !spare.isEmpty, TrayPrefs.showBonus {
             menu.addItem(sectionRow("Credito AI", providerId: nil))
             for email in spare.keys.sorted() {
-                menu.addItem(creditRow(spare[email]!, email: email))
+                menu.addItem(emailRow(email))
+                menu.addItem(creditRow(spare[email]!))
             }
         }
     }
     menu.addItem(NSMenuItem.separator())
-    let refreshItem = NSMenuItem(title: "Refresh", action: #selector(AppDelegate.refresh), keyEquivalent: "r")
+    for (title, sel, on) in [
+        ("Mostra fascia giornaliera (5H)", #selector(AppDelegate.toggleDaily), TrayPrefs.showDaily),
+        ("Mostra credito API", #selector(AppDelegate.toggleApi), TrayPrefs.showApi),
+        ("Mostra bonus cloud", #selector(AppDelegate.toggleBonus), TrayPrefs.showBonus),
+    ] {
+        let it = NSMenuItem(title: title, action: sel, keyEquivalent: "")
+        it.target = actionTarget
+        it.state = on ? .on : .off
+        menu.addItem(it)
+    }
+    menu.addItem(NSMenuItem.separator())
+    let refreshItem = NSMenuItem(title: "Aggiorna", action: #selector(AppDelegate.refresh), keyEquivalent: "r")
     refreshItem.target = actionTarget
     menu.addItem(refreshItem)
     // Dashboard = vdm (:3335, tool privato): mostrarla solo quando vdm
     // risponde, altrove sarebbe un link morto.
     let claudeErr = snapshot?.providers.first(where: { $0.id == "claude" })?.error
     if !isOffline, claudeErr == nil {
-        let dashItem = NSMenuItem(title: "Open Dashboard", action: #selector(AppDelegate.openDashboard), keyEquivalent: "d")
+        let dashItem = NSMenuItem(title: "Apri dashboard", action: #selector(AppDelegate.openDashboard), keyEquivalent: "d")
         dashItem.target = actionTarget
         menu.addItem(dashItem)
     }
-    let quitItem = NSMenuItem(title: "Quit", action: #selector(AppDelegate.quit), keyEquivalent: "q")
+    let quitItem = NSMenuItem(title: "Esci", action: #selector(AppDelegate.quit), keyEquivalent: "q")
     quitItem.target = actionTarget
     menu.addItem(quitItem)
     return menu
@@ -834,7 +1002,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.toolTip = "usage-server offline (:3337)"
         } else {
             let parts = (snapshot?.providers ?? []).flatMap { $0.accounts ?? [] }
-                .map { "\($0.label) (\($0.code)): \($0.quotas.map { "\($0.key.uppercased()) \($0.usedPct)% ↻\($0.resetText)\($0.detail.map { " " + $0 } ?? "")" }.joined(separator: " "))" }
+                .map { "\($0.label) (\($0.code)): \($0.quotas.map { "\($0.key.uppercased()) \($0.usedPct)% ↻\($0.resetText)\($0.detail.map { " " + $0 } ?? "")" }.joined(separator: " "))" + ($0.resetCredits.map { " (reset manuali: \($0.available))" } ?? "") }
             statusItem.button?.toolTip = parts.joined(separator: "\n")
         }
         barView.needsDisplay = true
@@ -846,6 +1014,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func refresh() { fetchData() }
+    @objc func toggleDaily() { TrayPrefs.showDaily.toggle(); rebuildMenu() }
+    @objc func toggleApi() { TrayPrefs.showApi.toggle(); rebuildMenu() }
+    @objc func toggleBonus() { TrayPrefs.showBonus.toggle(); rebuildMenu() }
 
     @objc func openDashboard() {
         NSWorkspace.shared.open(URL(string: "http://localhost:3335")!)
