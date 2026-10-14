@@ -675,3 +675,15 @@ describe("history", () => {
     assert.deepEqual(again.samples().map((s) => s.t), [NOW - 3600, NOW]);
   });
 });
+
+describe("fetchVdm", () => {
+  it("vdm lento o giù: ultima risposta buona per 15 minuti, poi errore", async () => {
+    const { fetchVdm } = await import("./server.mjs");
+    const T = 1_800_000_000_000;
+    const ok = async () => ({ ok: true, json: async () => ({ profiles: [{ label: "me@example.com" }] }) });
+    const down = async () => { throw new Error("aborted"); };
+    assert.equal((await fetchVdm({ fetchImpl: ok, now: T })).profiles[0].label, "me@example.com");
+    assert.equal((await fetchVdm({ fetchImpl: down, now: T + 14 * 60_000 })).profiles[0].label, "me@example.com");
+    await assert.rejects(fetchVdm({ fetchImpl: down, now: T + 16 * 60_000 }));
+  });
+});

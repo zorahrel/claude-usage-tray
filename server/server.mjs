@@ -40,15 +40,25 @@ function statusFor(usedPct, override) {
   return "ok";
 }
 
-async function fetchVdm() {
+// vdm interroga Anthropic dentro /api/profiles: misurato da 0,5 a 27s (14/10).
+// Un giro lento non deve svuotare Claude ("vdm offline", zero account): si
+// ripiega sull'ultima risposta buona finché ha meno di 15 minuti.
+const VDM_TIMEOUT_MS = 20000;
+const VDM_FALLBACK_MS = 15 * 60 * 1000;
+let lastVdm = null; // { at, data }
+
+export async function fetchVdm({ fetchImpl = fetch, now = Date.now(), timeoutMs = VDM_TIMEOUT_MS } = {}) {
   const ctrl = new AbortController();
-  // vdm a freddo rinfresca i rate limit e ci mette anche 14s (14/10):
-  // a 5s la tray perdeva tutti gli account Claude ("vdm offline").
-  const t = setTimeout(() => ctrl.abort(), 25000);
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch("http://localhost:3335/api/profiles", { signal: ctrl.signal });
+    const res = await fetchImpl("http://localhost:3335/api/profiles", { signal: ctrl.signal });
     if (!res.ok) throw new Error(`vdm ${res.status}`);
-    return await res.json();
+    const data = await res.json();
+    lastVdm = { at: now, data };
+    return data;
+  } catch (e) {
+    if (lastVdm && now - lastVdm.at < VDM_FALLBACK_MS) return lastVdm.data;
+    throw e;
   } finally {
     clearTimeout(t);
   }
