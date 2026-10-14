@@ -11,9 +11,14 @@ import { probeCloudCredits, creditAccount, saveLastGood, loadLastGood,
          loadCreditMap, saveCreditMap, mergeCreditMap } from "./probes/cloud-credit.mjs";
 import { probeOpenRouter, probeEleven } from "./probes/hub.mjs";
 import { probeAnthropicApi, probeAnthropicConsole } from "./probes/anthropic-api.mjs";
+import { createHistory, attachHistory, defaultHistoryPath } from "./history.mjs";
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 3337;
+
+// Archivio temporale delle quote (history.mjs): caricato pigro alla prima
+// overview, mai a import (i test importano questo modulo senza fs).
+const history = createHistory(process.env.USAGE_HISTORY_PATH || defaultHistoryPath());
 
 function resetText(epochSec) {
   if (!epochSec) return "";
@@ -137,7 +142,10 @@ function mapMuse(out, now = Math.floor(Date.now() / 1000)) {
     return { key: q.type === "session" ? "5h" : q.type === "weekly" ? "7d" : q.type,
              usedPct: used, resetsAt,
              resetText: stale ? staleText(out.asOf, now) : resetText(resetsAt),
-             status: stale ? "stale" : statusFor(used, null) };
+             status: stale ? "stale" : statusFor(used, null),
+             // Istante della lettura vera: a dato vecchio lo storico deve
+             // collocarlo lì, non quando questa overview lo rilegge.
+             observedAt: typeof out.asOf === "number" ? out.asOf : undefined };
   });
   const worst = Math.max(...quotas.map((q) => q.usedPct));
   const email = out.email;
@@ -279,6 +287,13 @@ async function overview() {
   for (const email of liveNow) {
     if (cmap.credits[email]) cmap.credits[email] = { ...cmap.credits[email], stale: false };
   }
+  // Storico: registra il campione di adesso e allega a ogni quota la sua
+  // serie (log nostro + vdm per Claude). Mai bloccante: se salta, la tray
+  // mostra le solite barre senza sparkline.
+  try {
+    history.record(providers);
+    attachHistory(providers, vdm, history.samples());
+  } catch { /* overview vince sempre */ }
   return { ok: true, at: Date.now(), providers, renewals,
            credit: merged.credit, credits: cmap.credits };
 }

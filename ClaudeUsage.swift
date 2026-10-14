@@ -75,6 +75,15 @@ struct Quota: Codable {
     // Testo lungo per il tooltip (es. credito API: speso su concesso e ora
     // di lettura). Il server vecchio non la manda: resta nil.
     let note: String?
+    // Andamento della % nel tempo (log del server + vdm per Claude):
+    // sparkline nel menu. Il server vecchio non la manda: resta nil.
+    let history: [HistoryPoint]?
+}
+
+// t epoch secondi, v = % usata (decimale da vdm, intera dal log).
+struct HistoryPoint: Codable {
+    let t: Int
+    let v: Double
 }
 
 struct Renewal: Codable {
@@ -530,6 +539,214 @@ func hubQuotaRow(_ q: Quota) -> NSMenuItem {
                      status: q.status, detail: detail, tooltip: q.note)
 }
 
+// Copertura reale della serie, etichetta a sx della sparkline: "45M", "5H", "3G".
+// Durata in parole per la riga di sintesi sopra il grafico: "2H" da solo
+// non dice se sono ore di dati, di quota o di attesa (segnalato dal vivo).
+func durationText(_ seconds: Int) -> String {
+    if seconds >= 36 * 3600 {
+        let d = Int((Double(seconds) / 86400).rounded())
+        return d == 1 ? "Ultimo 1 giorno" : "Ultimi \(d) giorni"
+    }
+    if seconds >= 90 * 60 {
+        let h = Int((Double(seconds) / 3600).rounded())
+        return h == 1 ? "Ultima 1 ora" : "Ultime \(h) ore"
+    }
+    return "Ultimi \(max(1, seconds / 60)) minuti"
+}
+
+func pctLabel(_ v: Double) -> String {
+    v == v.rounded() ? "\(Int(v))%" : String(format: "%.1f%%", v)
+}
+
+// Indicatori dell'asse tempo: ora se la serie è intraday, data+ora quando
+// copre più di un giorno. Epoch locali del Mac, come le altre date del menu.
+func timeLabel(_ epoch: Int, longSpan: Bool) -> String {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = longSpan ? "dd/MM HH:mm" : "HH:mm"
+    return f.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
+}
+
+
+
+// Grafico sotto la riga quota, in tre bande che non si toccano mai:
+// sopra sintesi e 100%, in mezzo il grafico da sinistra a tutta larghezza
+// (scala percentuale piena 0...100, curva a gradini, barre dove la % sale),
+// sotto 0% e orari di inizio/fine. Nessun testo dentro il grafico: i numeri
+// stanno nelle loro bande. I buchi lunghi spezzano curva e barre.
+func sparklineRow(_ q: Quota) -> NSMenuItem? {
+    guard let pts = q.history, pts.count >= 2,
+          let first = pts.first, let last = pts.last, last.t > first.t else { return nil }
+    let g = MenuGrid.self
+    let rowH: CGFloat = 48
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: menuW, height: rowH))
+    let vs = pts.map { $0.v }
+    let vMin = vs.min() ?? 0, vMax = vs.max() ?? 0
+    // Salti di consumo tra misure CONTIGUE: oltre gapLimit il quando è ignoto.
+    let gapLimit = max(1800, (last.t - first.t) / 6)
+    var jumps: [(to: HistoryPoint, delta: Double)] = []
+    for (prev, cur) in zip(pts, pts.dropFirst()) where cur.t - prev.t <= gapLimit {
+        if cur.v > prev.v { jumps.append((cur, cur.v - prev.v)) }
+    }
+    let peak = jumps.max { $0.delta < $1.delta }
+    let color = statusColor(q.status)
+    let longSpan = last.t - first.t >= 86400
+    // Geometria a tre bande separate: testi y 37...47 e y 0...11, grafico
+    // y 12...35. Il grafico parte da sinistra (lead, come gli account) e
+    // occupa tutta la larghezza fino a right; la % usa la scala piena.
+    let plotX = g.lead
+    let plotW = g.right - plotX
+    let plotY: CGFloat = 12, plotH: CGFloat = 23
+    // 1pt di respiro ai bordi: la linea a 0% o 100% non viene tagliata,
+    // ma resta la scala vera 0...100, senza zoom locali.
+    func yFor(_ v: Double) -> CGFloat {
+        1 + CGFloat(min(100, max(0, v)) / 100) * (plotH - 2)
+    }
+    // Sintesi in parole nella banda alta: ogni numero col suo nome
+    // (durata dei dati, minimo, massimo, salita singola più grande, quando).
+    let duration = durationText(last.t - first.t)
+    let summaryText: String
+    if vMin == vMax {
+        summaryText = "\(duration) · sempre \(pctLabel(vMin)) · nessuna salita"
+    } else if let peak {
+        summaryText = "\(duration) · min \(pctLabel(vMin)) · max \(pctLabel(vMax))"
+            + " · salita max +\(pctLabel(peak.delta)) alle \(timeLabel(peak.to.t, longSpan: false))"
+    } else {
+        summaryText = "\(duration) · min \(pctLabel(vMin)) · max \(pctLabel(vMax)) · nessuna salita"
+    }
+    let topAxis = gridLabel("100%", x: plotX, w: 32,
+                            font: .systemFont(ofSize: 8.5), color: .secondaryLabelColor)
+    topAxis.frame = NSRect(x: plotX, y: 37, width: 32, height: 10)
+    view.addSubview(topAxis)
+    let summary = gridLabel(summaryText, x: plotX + 38, w: g.right - (plotX + 38),
+                            font: .systemFont(ofSize: 8.5), color: .secondaryLabelColor)
+    summary.frame = NSRect(x: plotX + 38, y: 37, width: g.right - (plotX + 38), height: 10)
+    view.addSubview(summary)
+    let plot = NSView(frame: NSRect(x: plotX, y: plotY, width: plotW, height: plotH))
+    plot.wantsLayer = true
+    plot.layer?.cornerRadius = 4
+    plot.layer?.masksToBounds = true
+    plot.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.05).cgColor
+    view.addSubview(plot)
+    // Griglia interna: solo linee (50% tenue, 100% più marcata), mai testo.
+    for ref in [50.0, 100.0] {
+        let line = NSView(frame: NSRect(x: 0, y: yFor(ref), width: plotW, height: 1))
+        line.wantsLayer = true
+        line.layer?.backgroundColor = NSColor.labelColor
+            .withAlphaComponent(ref == 50 ? 0.08 : 0.18).cgColor
+        plot.addSubview(line)
+    }
+    // Banda bassa: 0% allineato al fondo del grafico, poi inizio e fine.
+    let zeroAxis = gridLabel("0%", x: plotX, w: 32,
+                             font: .systemFont(ofSize: 8.5), color: .secondaryLabelColor)
+    zeroAxis.frame = NSRect(x: plotX, y: 1, width: 32, height: 10)
+    view.addSubview(zeroAxis)
+    let t0 = gridLabel("dalle \(timeLabel(first.t, longSpan: longSpan))",
+                       x: plotX + 38, w: 120,
+                       font: .systemFont(ofSize: 8.5), color: .secondaryLabelColor)
+    t0.frame = NSRect(x: plotX + 38, y: 1, width: 120, height: 10)
+    view.addSubview(t0)
+    let t1 = gridLabel("alle \(timeLabel(last.t, longSpan: longSpan))",
+                       x: g.right - 120, w: 120,
+                       font: .systemFont(ofSize: 8.5), color: .secondaryLabelColor,
+                       align: .right)
+    t1.frame = NSRect(x: g.right - 120, y: 1, width: 120, height: 10)
+    view.addSubview(t1)
+    let spanT = CGFloat(last.t - first.t)
+    func point(_ p: HistoryPoint) -> CGPoint {
+        CGPoint(x: 2 + CGFloat(p.t - first.t) / spanT * (plotW - 4), y: yFor(p.v))
+    }
+    var segments: [[CGPoint]] = [[point(first)]]
+    for (prev, cur) in zip(pts, pts.dropFirst()) {
+        if cur.t - prev.t > gapLimit { segments.append([]) }
+        segments[segments.count - 1].append(point(cur))
+    }
+    // Barre di consumo sul fondo: a ogni salita contigua, altezza relativa
+    // al picco ma confinata in 8pt, così restano un indicatore di QUANDO
+    // senza diventare una seconda curva con una scala sua.
+    if let peak {
+        for jump in jumps {
+            let h = 2 + CGFloat(jump.delta / peak.delta) * 6
+            let bar = CAShapeLayer()
+            bar.frame = plot.bounds
+            bar.path = CGPath(rect: CGRect(x: point(jump.to).x - 1.5, y: 0,
+                                           width: 3, height: h), transform: nil)
+            bar.fillColor = color.withAlphaComponent(0.30).cgColor
+            plot.layer?.addSublayer(bar)
+        }
+        // Riga verticale sul picco: dove è successo il salto più grande.
+        let pp = point(peak.to)
+        let tick = CAShapeLayer()
+        tick.frame = plot.bounds
+        tick.path = CGPath(rect: CGRect(x: pp.x - 0.5, y: 0, width: 1, height: pp.y),
+                           transform: nil)
+        tick.fillColor = color.withAlphaComponent(0.45).cgColor
+        plot.layer?.addSublayer(tick)
+    }
+    for seg in segments where seg.count >= 2 {
+        let line = CGMutablePath()
+        line.move(to: seg[0])
+        // A gradini: orizzontale fino alla misura dopo, poi salto verticale.
+        for i in seg.indices.dropFirst() {
+            line.addLine(to: CGPoint(x: seg[i].x, y: seg[i - 1].y))
+            line.addLine(to: seg[i])
+        }
+        let fill = CGMutablePath()
+        fill.addPath(line)
+        fill.addLine(to: CGPoint(x: seg.last!.x, y: 0))
+        fill.addLine(to: CGPoint(x: seg[0].x, y: 0))
+        fill.closeSubpath()
+        let fillLayer = CAShapeLayer()
+        fillLayer.frame = plot.bounds
+        fillLayer.path = fill
+        fillLayer.fillColor = color.withAlphaComponent(0.13).cgColor
+        plot.layer?.addSublayer(fillLayer)
+        let lineLayer = CAShapeLayer()
+        lineLayer.frame = plot.bounds
+        lineLayer.path = line
+        lineLayer.strokeColor = color.cgColor
+        lineLayer.fillColor = NSColor.clear.cgColor
+        lineLayer.lineWidth = 1.5
+        lineLayer.lineJoin = .round
+        lineLayer.lineCap = .round
+        plot.layer?.addSublayer(lineLayer)
+    }
+    func addDot(at p: CGPoint, diameter: CGFloat = 4, ring: Bool = false) {
+        let r = diameter / 2
+        let dot = CAShapeLayer()
+        dot.frame = plot.bounds
+        dot.path = CGPath(ellipseIn: CGRect(x: p.x - r, y: p.y - r,
+                                            width: diameter, height: diameter),
+                          transform: nil)
+        dot.fillColor = color.cgColor
+        if ring {
+            dot.strokeColor = NSColor.white.cgColor
+            dot.lineWidth = 1
+        }
+        plot.layer?.addSublayer(dot)
+    }
+    // Le misure isolate da un buco (es. cache Muse vecchia, poi il refresh
+    // un'ora dopo) non fanno segmento: senza pallino sparirebbero del tutto.
+    for seg in segments where seg.count == 1 { addDot(at: seg[0]) }
+    addDot(at: point(first))
+    // Picco cerchiato in bianco: solo segno grafico, il numero sta nella
+    // sintesi sopra (niente testi dentro il grafico).
+    if let peak { addDot(at: point(peak.to), diameter: 6, ring: true) }
+    // punto finale: dove siamo adesso
+    addDot(at: point(last))
+    var tip = "Andamento \(q.key.uppercased()): dalle \(timeLabel(first.t, longSpan: longSpan))"
+        + " alle \(timeLabel(last.t, longSpan: longSpan))"
+        + " · min \(pctLabel(vMin)) · max \(pctLabel(vMax))"
+        + " · \(pts.count) campioni · asse 0–100%"
+    if let peak {
+        tip += " · salita max +\(pctLabel(peak.delta)) alle \(timeLabel(peak.to.t, longSpan: longSpan))"
+    }
+    let item = NSMenuItem()
+    item.view = view
+    item.toolTip = tip
+    return item
+}
+
 // Riga Abbonamento: costo, non saldo. Nome del servizio intero ("Muse Code",
 // non "Code"): niente prefissi tolti, si legge uguale sotto ogni provider.
 // Il dettaglio resta tenue: è un promemoria, non un consumo.
@@ -747,6 +964,7 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
         menu.addItem(legendRow("Account affievolito: non attivo · ↻: reset o rinnovo"))
         menu.addItem(legendRow("↻N in testata: reset manuali disponibili"))
         menu.addItem(legendRow("Nel menu: barra e % = consumato · a destra reset, saldo o scadenza"))
+        menu.addItem(legendRow("Grafico quota: curva su asse 0–100% · barre sul fondo = salite · ○ = salita max"))
         let providers = snapshot?.providers ?? []
         let renewals = snapshot?.renewals ?? []
         let cmap = creditMap(snapshot)
@@ -772,11 +990,13 @@ func buildMenu(snapshot: Overview?, isOffline: Bool, actionTarget: AnyObject?) -
                 for q in a.quotas {
                     if q.key.lowercased() == "5h", !TrayPrefs.showDaily { continue }
                     menu.addItem(p.billing == "usage" ? hubQuotaRow(q) : quotaBarRow(q))
+                    if let spark = sparklineRow(q) { menu.addItem(spark) }
                 }
                 // Speso API sotto le quote del SUO account (solo guedado):
                 // è a consumo come l'hub, ma raggruppato qui e non in sezione.
                 if TrayPrefs.showApi, let api = a.apiSpend {
                     menu.addItem(apiBarRow(api))
+                    if let spark = sparklineRow(api) { menu.addItem(spark) }
                 }
                 // Reset manuali sotto le quote (è roba di quote): solo se noti,
                 // Codex li dà, Claude no (promo senza API → niente riga).

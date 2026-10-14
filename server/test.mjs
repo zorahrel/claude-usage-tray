@@ -5,6 +5,8 @@ import { resetText, statusFor, mapClaude, mapMuse, mapQuotas, filterRenewals, to
 import { parseCloudCredit } from "./probes/cloud-credit.mjs";
 import { EventEmitter } from "node:events";
 import { rpc } from "./probes/codex.mjs";
+import { quotaWindowSec, samplesFromProviders, parseHistory,
+         decimate, vdmSeries, mergeSeries, attachHistory, createHistory } from "./history.mjs";
 
 describe("resetText", () => {
   it("rende ore+minuti e giorni", () => {
@@ -92,6 +94,8 @@ describe("mapMuse", () => {
     assert.equal(old.accounts[0].status, "stale");
     assert.equal(old.accounts[0].quotas[0].status, "stale");
     assert.equal(old.accounts[0].quotas[0].resetText, "dato di 48m fa");
+    // lo storico colloca il punto alla lettura vera, non alla rilettura
+    assert.equal(old.accounts[0].quotas[0].observedAt, now - 48 * 60);
     assert.equal(mapMuse({ quotas, asOf: now - 3 * 3600 }, now).accounts[0].quotas[0].resetText, "dato di 3h fa");
     const fresh = mapMuse({ quotas, asOf: now - 60 }, now);
     assert.equal(fresh.accounts[0].quotas[0].status, "warning");
@@ -539,5 +543,135 @@ describe("resetCredits", () => {
       rateLimits: { fiveH: { utilization: 0.1, reset: 1 },
                     sevenD: { utilization: 0.2, reset: 1 } } }] };
     assert.equal(mapClaude(vdm).accounts[0].resetCredits, null);
+  });
+});
+
+describe("history", () => {
+  const NOW = 1791830000;
+  const providers = (pct5, pct7) => [{ id: "codex", name: "Codex", accounts: [
+    { id: "codex", label: "ada@example.com", code: "COD", active: true, status: "ok",
+      quotas: [{ key: "5h", usedPct: pct5 }, { key: "7d", usedPct: pct7 }],
+      apiSpend: { key: "API", usedPct: 42 } }] }];
+
+  it("quotaWindowSec: finestra per tipo di quota", () => {
+    assert.equal(quotaWindowSec("5h"), 86400);
+    assert.equal(quotaWindowSec("7d"), 7 * 86400);
+    assert.equal(quotaWindowSec("API"), 30 * 86400);
+    assert.equal(quotaWindowSec("usd"), 30 * 86400);
+    assert.equal(quotaWindowSec("altro"), 7 * 86400);
+  });
+  it("samplesFromProviders: quote e apiSpend, chiavi stabili", () => {
+    const [s] = samplesFromProviders(providers(10, 20), NOW);
+    assert.equal(s.t, NOW);
+    assert.equal(s.s["codex|ada@example.com|5h"], 10);
+    assert.equal(s.s["codex|ada@example.com|7d"], 20);
+    assert.equal(s.s["codex|ada@example.com|API"], 42);
+  });
+  it("samplesFromProviders: stale al suo observedAt, unknown fuori", () => {
+    const ps = [...providers(10, 20), { id: "muse", name: "Muse", accounts: [
+      { id: "muse-code", label: "ada@example.com", code: "MUS", active: true,
+        status: "stale", quotas: [
+          { key: "5h", usedPct: 7, status: "stale", observedAt: NOW - 3600 },
+          { key: "7d", usedPct: 28, status: "stale" },
+          { key: "usd", usedPct: 0, status: "unknown", observedAt: NOW - 3600 }] }] }];
+    const ss = samplesFromProviders(ps, NOW);
+    assert.equal(ss.length, 2);
+    assert.equal(ss[0].t, NOW - 3600);
+    assert.deepEqual(ss[0].s, { "muse|ada@example.com|5h": 7 });
+    assert.equal(ss[1].t, NOW);
+  });
+  it("parseHistory: riga corrotta saltata, ordine per tempo", () => {
+    const text = `${JSON.stringify({ t: 2, s: {} })}\nrotto{\n${JSON.stringify({ t: 1, s: {} })}\n`;
+    assert.deepEqual(parseHistory(text).map((o) => o.t), [1, 2]);
+    assert.deepEqual(parseHistory(null), []);
+  });
+  it("decimate: tetto ai punti, primo e ultimo sempre presenti", () => {
+    const pts = Array.from({ length: 200 }, (_, i) => ({ t: i, v: i }));
+    const d = decimate(pts, 72);
+    assert.equal(d.length, 72);
+    assert.equal(d[0].t, 0);
+    assert.equal(d[d.length - 1].t, 199);
+    assert.equal(decimate(pts.slice(0, 3), 72).length, 3);
+  });
+  it("decimate: un picco breve sopravvive (la uniforme lo saltava)", () => {
+    const pts = Array.from({ length: 200 }, (_, i) => ({ t: i, v: i === 101 ? 90 : 5 }));
+    assert.ok(decimate(pts, 72).some((p) => p.v === 90));
+  });
+  it("vdmSeries: u in %, finestra e dedup tra le due serie vdm", () => {
+    const profile = {
+      utilizationHistory: [
+        { ts: (NOW - 3600) * 1000, u5h: 0.1, u7d: 0.5 },
+        { ts: (NOW - 60) * 1000, u5h: 0.27, u7d: 0.51 }],
+      weeklyHistory: [
+        { ts: (NOW - 90000) * 1000, u5h: 0, u7d: 0.4 },
+        { ts: (NOW - 60) * 1000, u5h: 0.27, u7d: 0.51 }],
+    };
+    assert.deepEqual(vdmSeries(profile, "5h", 86400, NOW),
+                     [{ t: NOW - 3600, v: 10 }, { t: NOW - 60, v: 27 }]);
+    assert.equal(vdmSeries(profile, "7d", 7 * 86400, NOW).length, 3);
+    assert.deepEqual(vdmSeries(null, "5h", 86400, NOW), []);
+    assert.deepEqual(vdmSeries(profile, "xx", 86400, NOW), []);
+  });
+  it("mergeSeries: a pari istante vince vdm (decimale)", () => {
+    const merged = mergeSeries([{ t: NOW, v: 27 }], [{ t: NOW + 30, v: 27.4 }]);
+    assert.deepEqual(merged, [{ t: NOW + 30, v: 27.4 }]);
+  });
+  it("attachHistory: serie dal log, mai con un punto solo", () => {
+    const samples = [samplesFromProviders(providers(5, 10), NOW - 3600)[0],
+                     samplesFromProviders(providers(9, 10), NOW - 60)[0]];
+    const ps = providers(9, 10);
+    attachHistory(ps, null, samples, NOW);
+    assert.deepEqual(ps[0].accounts[0].quotas[0].history,
+                     [{ t: NOW - 3600, v: 5 }, { t: NOW - 60, v: 9 }]);
+    const one = providers(9, 10);
+    attachHistory(one, null, samples.slice(0, 1), NOW);
+    assert.equal(one[0].accounts[0].quotas[0].history, undefined);
+  });
+  it("attachHistory: Claude prende la serie vdm anche a log vuoto", () => {
+    const ps = [{ id: "claude", name: "Claude", accounts: [
+      { id: "ada@example.com", label: "ada@example.com", code: "ADA", active: true,
+        status: "ok", quotas: [{ key: "5h", usedPct: 27 }] }] }];
+    const vdm = { profiles: [{ name: "a", label: "ada@example.com",
+      utilizationHistory: [{ ts: (NOW - 7200) * 1000, u5h: 0, u7d: 0.4 },
+                           { ts: (NOW - 60) * 1000, u5h: 0.27, u7d: 0.45 }],
+      weeklyHistory: [] }] };
+    attachHistory(ps, vdm, [], NOW);
+    assert.deepEqual(ps[0].accounts[0].quotas[0].history,
+                     [{ t: NOW - 7200, v: 0 }, { t: NOW - 60, v: 27 }]);
+  });
+  it("createHistory: append su file, rilettura e dedup dei fermi", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tray-hist-")),
+                           "sub", "history.jsonl");
+    const h = createHistory(file);
+    assert.equal(h.record(providers(5, 10), NOW), true);
+    assert.equal(h.record(providers(5, 10), NOW + 60), false);
+    assert.equal(h.record(providers(8, 10), NOW + 120), true);
+    assert.equal(h.record(providers(8, 10), NOW + 905), true); // heartbeat
+    const again = createHistory(file);
+    assert.equal(again.samples().length, 3);
+    assert.equal(again.samples()[1].s["codex|ada@example.com|5h"], 8);
+  });
+  it("createHistory: punto stale inserito al tempo vero, una sola volta", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "tray-hist-")),
+                           "history.jsonl");
+    const h = createHistory(file);
+    assert.equal(h.record(providers(5, 10), NOW), true);
+    const staleMuse = [{ id: "muse", name: "Muse", accounts: [
+      { id: "muse-code", label: "ada@example.com", code: "MUS", active: true,
+        status: "stale", quotas: [
+          { key: "5h", usedPct: 7, status: "stale", observedAt: NOW - 3600 }] }] }];
+    assert.equal(h.record(staleMuse, NOW + 60), true);
+    assert.equal(h.record(staleMuse, NOW + 120), false); // stessa cache riletta
+    assert.deepEqual(h.samples().map((s) => s.t), [NOW - 3600, NOW]);
+    assert.equal(h.samples()[0].s["muse|ada@example.com|5h"], 7);
+    // e alla rilettura da file l'ordine resta cronologico (append + sort)
+    const again = createHistory(file);
+    assert.deepEqual(again.samples().map((s) => s.t), [NOW - 3600, NOW]);
   });
 });
