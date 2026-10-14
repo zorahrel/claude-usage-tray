@@ -37,7 +37,9 @@ function statusFor(usedPct, override) {
 
 async function fetchVdm() {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 5000);
+  // vdm a freddo rinfresca i rate limit e ci mette anche 14s (14/10):
+  // a 5s la tray perdeva tutti gli account Claude ("vdm offline").
+  const t = setTimeout(() => ctrl.abort(), 25000);
   try {
     const res = await fetch("http://localhost:3335/api/profiles", { signal: ctrl.signal });
     if (!res.ok) throw new Error(`vdm ${res.status}`);
